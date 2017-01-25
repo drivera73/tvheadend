@@ -77,7 +77,7 @@ satip_device_block( const char *addr, int block )
         TAILQ_FOREACH(lfe, &sd->sd_frontends, sf_link)
           mpegts_input_stop_all((mpegts_input_t *)lfe);
       }
-      tvhinfo("satip", "address %s is %s", addr,
+      tvhinfo(LS_SATIP, "address %s is %s", addr,
               block < 0 ? "stopped" : (block > 0 ? "allowed" : "disabled"));
     }
   }
@@ -117,10 +117,28 @@ satip_device_nicename( satip_device_t *sd, char *buf, int len )
  * SAT-IP client
  */
 
-static void
-satip_device_class_save ( idnode_t *in )
+static htsmsg_t *
+satip_device_class_save ( idnode_t *in, char *filename, size_t fsize )
 {
-  satip_device_save((satip_device_t *)in);
+  satip_device_t *sd = (satip_device_t *)in;
+  satip_frontend_t *lfe;
+  htsmsg_t *m, *l;
+  char ubuf[UUID_HEX_SIZE];
+
+  if (sd->sd_nosave)
+    return NULL;
+
+  m = htsmsg_create_map();
+  idnode_save(&sd->th_id, m);
+
+  l = htsmsg_create_map();
+  TAILQ_FOREACH(lfe, &sd->sd_frontends, sf_link)
+    satip_frontend_save(lfe, l);
+  htsmsg_add_msg(m, "frontends", l);
+
+  snprintf(filename, fsize, "input/satip/adapters/%s",
+           idnode_uuid_as_str(&sd->th_id, ubuf));
+  return m;
 }
 
 static idnode_set_t *
@@ -188,11 +206,14 @@ satip_device_class_tunercfg_notify ( void *o, const char *lang )
     satip_device_destroy_later(sd, 100);
 }
 
+CLASS_DOC(satip_client)
+
 const idclass_t satip_device_class =
 {
   .ic_class      = "satip_client",
   .ic_event      = "satip_client",
-  .ic_caption    = N_("SAT>IP client"),
+  .ic_caption    = N_("SAT>IP Client"),
+  .ic_doc        = tvh_doc_satip_client_class,
   .ic_save       = satip_device_class_save,
   .ic_get_childs = satip_device_class_get_childs,
   .ic_get_title  = satip_device_class_get_title,
@@ -211,8 +232,9 @@ const idclass_t satip_device_class =
     {
       .type     = PT_BOOL,
       .id       = "tcp_mode",
-      .name     = N_("RTSP/TCP (embedded data)"),
-      .desc     = N_("Enable or disable RTSP/TCP (embedded data) support."),
+      .name     = N_("RTP/AVP/TCP (embedded data)"),
+      .desc     = N_("Enable or disable RTP/AVP/TCP transfer mode "
+                     "(embedded data in the RTSP session) support."),
       .opts     = PO_ADVANCED,
       .off      = offsetof(satip_device_t, sd_tcp_mode),
     },
@@ -310,7 +332,7 @@ const idclass_t satip_device_class =
       .id       = "skip_ts",
       .name     = N_("Skip TS packets (0-200)"),
       .desc     = N_("Skip x number of transport packets."),
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT,
       .off      = offsetof(satip_device_t, sd_skip_ts),
     },
     {
@@ -375,7 +397,7 @@ const idclass_t satip_device_class =
       .type     = PT_STR,
       .id       = "manufacturer",
       .name     = N_("Manufacturer"),
-      .name     = N_("The manufacturer of the SAT>IP server."),
+      .desc     = N_("The manufacturer of the SAT>IP server."),
       .opts     = PO_RDONLY | PO_NOSAVE,
       .off      = offsetof(satip_device_t, sd_info.manufacturer),
     },
@@ -498,6 +520,9 @@ satip_device_hack( satip_device_t *sd )
 {
   if(sd->sd_disable_workarounds)
       return;
+#if 0
+  /* V1.24.0.156 cannot be distinguished from V1.13.0.105 :-( */
+  /* hopefully, all users have V1.16.0.120+ now */
   if (sd->sd_info.deviceid[0] &&
       strcmp(sd->sd_info.server, "Linux/1.0 UPnP/1.1 IDL4K/1.0") == 0) {
     /* AXE Linux distribution - Inverto firmware */
@@ -506,9 +531,11 @@ satip_device_hack( satip_device_t *sd )
     sd->sd_fullmux_ok  = 0;
     sd->sd_pids_max    = 32;
     sd->sd_pids_deladd = 0;
-    tvhwarn("satip", "Detected old Inverto firmware V1.13.0.105 and less");
-    tvhwarn("satip", "Upgrade to V1.16.0.120 - http://http://www.inverto.tv/support/ - IDL400s");
-  } else if (strstr(sd->sd_info.location, ":8888/octonet.xml")) {
+    tvhwarn(LS_SATIP, "Detected old Inverto firmware V1.13.0.105 and less");
+    tvhwarn(LS_SATIP, "Upgrade to V1.16.0.120 - http://http://www.inverto.tv/support/ - IDL400s");
+  } else
+#endif
+  if (strstr(sd->sd_info.location, ":8888/octonet.xml")) {
     /* OctopusNet requires pids in the SETUP RTSP command */
     sd->sd_pids0       = 1;
   } else if (strstr(sd->sd_info.manufacturer, "Triax") &&
@@ -565,6 +592,7 @@ satip_device_create( satip_device_info_t *info )
   pthread_mutex_init(&sd->sd_tune_mutex, NULL);
 
   TAILQ_INIT(&sd->sd_frontends);
+  TAILQ_INIT(&sd->sd_serialize_queue);
 
   /* we may check if uuid matches, but the SHA hash should be enough */
   if (sd->sd_info.uuid)
@@ -640,11 +668,11 @@ satip_device_create( satip_device_info_t *info )
       m = atoi(argv[i] + 6);
     }
     if (type == DVB_TYPE_NONE) {
-      tvhlog(LOG_ERR, "satip", "%s: bad tuner type [%s]",
-             satip_device_nicename(sd, buf2, sizeof(buf2)), argv[i]);
+      tvherror(LS_SATIP, "%s: bad tuner type [%s]",
+               satip_device_nicename(sd, buf2, sizeof(buf2)), argv[i]);
     } else if (m < 0 || m > 32) {
-      tvhlog(LOG_ERR, "satip", "%s: bad tuner count [%s]",
-             satip_device_nicename(sd, buf2, sizeof(buf2)), argv[i]);
+      tvherror(LS_SATIP, "%s: bad tuner count [%s]",
+               satip_device_nicename(sd, buf2, sizeof(buf2)), argv[i]);
     } else {
       sd->sd_nosave = 1;
       for (j = 0; j < m; j++)
@@ -655,7 +683,7 @@ satip_device_create( satip_device_info_t *info )
   }
 
   if (save)
-    satip_device_save(sd);
+    satip_device_changed(sd);
 
   sd->sd_inload = 0;
 
@@ -695,36 +723,15 @@ satip_device_find_by_descurl( const char *descurl )
 }
 
 void
-satip_device_save( satip_device_t *sd )
-{
-  satip_frontend_t *lfe;
-  htsmsg_t *m, *l;
-  char ubuf[UUID_HEX_SIZE];
-
-  if (sd->sd_nosave)
-    return;
-
-  m = htsmsg_create_map();
-  idnode_save(&sd->th_id, m);
-
-  l = htsmsg_create_map();
-  TAILQ_FOREACH(lfe, &sd->sd_frontends, sf_link)
-    satip_frontend_save(lfe, l);
-  htsmsg_add_msg(m, "frontends", l);
-
-  hts_settings_save(m, "input/satip/adapters/%s",
-                    idnode_uuid_as_str(&sd->th_id, ubuf));
-  htsmsg_destroy(m);
-}
-
-void
 satip_device_destroy( satip_device_t *sd )
 {
   satip_frontend_t *lfe;
 
   lock_assert(&global_lock);
 
-  gtimer_disarm(&sd->sd_destroy_timer);
+  mtimer_disarm(&sd->sd_destroy_timer);
+
+  idnode_save_check(&sd->th_id, 0);
 
   while ((lfe = TAILQ_FIRST(&sd->sd_frontends)) != NULL)
     satip_frontend_delete(lfe);
@@ -767,7 +774,7 @@ satip_device_destroy_cb( void *aux )
 void
 satip_device_destroy_later( satip_device_t *sd, int after )
 {
-  gtimer_arm_ms(&sd->sd_destroy_timer, satip_device_destroy_cb, sd, after);
+  mtimer_arm_rel(&sd->sd_destroy_timer, satip_device_destroy_cb, sd, ms2mono(after));
 }
 
 /*
@@ -785,7 +792,7 @@ typedef struct satip_discovery {
   char *deviceid;
   url_t url;
   http_client_t *http_client;
-  time_t http_start;
+  int64_t http_start;
 } satip_discovery_t;
 
 TAILQ_HEAD(satip_discovery_queue, satip_discovery);
@@ -794,10 +801,10 @@ static int satip_enabled;
 static int satip_discoveries_count;
 static struct satip_discovery_queue satip_discoveries;
 static upnp_service_t *satip_discovery_service;
-static gtimer_t satip_discovery_timer;
-static gtimer_t satip_discovery_static_timer;
-static gtimer_t satip_discovery_timerq;
-static gtimer_t satip_discovery_msearch_timer;
+static mtimer_t satip_discovery_timer;
+static mtimer_t satip_discovery_static_timer;
+static mtimer_t satip_discovery_timerq;
+static mtimer_t satip_discovery_msearch_timer;
 static str_list_t *satip_static_clients;
 
 static void
@@ -806,7 +813,7 @@ satip_discovery_destroy(satip_discovery_t *d, int unlink)
   if (d == NULL)
     return;
   if (unlink) {
-    satip_discoveries_count--;
+    atomic_dec(&satip_discoveries_count, 1);
     TAILQ_REMOVE(&satip_discoveries, d, disc_link);
   }
   if (d->http_client)
@@ -858,13 +865,13 @@ satip_discovery_http_closed(http_client_t *hc, int errn)
   }
   if (errn != 0 || s == NULL || hc->hc_code != 200 ||
       hc->hc_data_size == 0 || hc->hc_data == NULL) {
-    tvhlog(LOG_ERR, "satip", "Cannot get %s: %s", d->location, strerror(errn));
+    tvherror(LS_SATIP, "Cannot get %s: %s", d->location, strerror(errn));
     return;
   }
 
   if (tvhtrace_enabled()) {
-    tvhtrace("satip", "received XML description from %s", hc->hc_host);
-    tvhlog_hexdump("satip", hc->hc_data, hc->hc_data_size);
+    tvhtrace(LS_SATIP, "received XML description from %s", hc->hc_host);
+    tvhlog_hexdump(LS_SATIP, hc->hc_data, hc->hc_data_size);
   }
 
   if (d->myaddr == NULL || d->myaddr[0] == '\0') {
@@ -888,7 +895,7 @@ satip_discovery_http_closed(http_client_t *hc, int errn)
   xml = htsmsg_xml_deserialize(hc->hc_data, errbuf, sizeof(errbuf));
   hc->hc_data = NULL;
   if (!xml) {
-    tvhlog(LOG_ERR, "satip_discovery_desc", "htsmsg_xml_deserialize error %s", errbuf);
+    tvherror(LS_SATIP, "satip_discovery_desc htsmsg_xml_deserialize error %s", errbuf);
     goto finish;
   }
   if ((tags         = htsmsg_get_map(xml, "tags")) == NULL)
@@ -908,7 +915,7 @@ satip_discovery_http_closed(http_client_t *hc, int errn)
   if ((friendlyname = htsmsg_xml_get_cdata_str(device, "friendlyName")) == NULL)
     goto finish;
   if ((manufacturer = htsmsg_xml_get_cdata_str(device, "manufacturer")) == NULL)
-    goto finish;
+    manufacturer = "";
   if ((manufacturerURL = htsmsg_xml_get_cdata_str(device, "manufacturerURL")) == NULL)
     manufacturerURL = "";
   if ((modeldesc    = htsmsg_xml_get_cdata_str(device, "modelDescription")) == NULL)
@@ -1009,7 +1016,7 @@ satip_discovery_timerq_cb(void *aux)
     d = next;
     next = TAILQ_NEXT(d, disc_link);
     if (d->http_client) {
-      if (dispatch_clock - d->http_start > 4)
+      if (mclk() - d->http_start > sec2mono(4))
         satip_discovery_destroy(d, 1);
       continue;
     }
@@ -1019,7 +1026,7 @@ satip_discovery_timerq_cb(void *aux)
     if (d->http_client == NULL)
       satip_discovery_destroy(d, 1);
     else {
-      d->http_start = dispatch_clock;
+      d->http_start = mclk();
       d->http_client->hc_conn_closed = satip_discovery_http_closed;
       http_client_register(d->http_client);
       r = http_client_simple(d->http_client, &d->url);
@@ -1028,7 +1035,7 @@ satip_discovery_timerq_cb(void *aux)
     }
   }
   if (TAILQ_FIRST(&satip_discoveries))
-    gtimer_arm(&satip_discovery_timerq, satip_discovery_timerq_cb, NULL, 5);
+    mtimer_arm_rel(&satip_discovery_timerq, satip_discovery_timerq_cb, NULL, sec2mono(5));
 }
 
 static void
@@ -1049,7 +1056,7 @@ satip_discovery_service_received
   satip_discovery_t *d;
   int n, i;
 
-  if (len > 8191 || satip_discoveries_count > 100)
+  if (len > 8191 || atomic_get(&satip_discoveries_count) > 100)
     return;
   buf = alloca(len+1);
   memcpy(buf, data, len);
@@ -1109,7 +1116,7 @@ satip_discovery_service_received
     goto add_uuid;
   if (location == NULL || strncmp(location, "http://", 7))
     goto add_uuid;
-  if (bootid == NULL || configid == NULL || server == NULL)
+  if (server == NULL)
     goto add_uuid;
 
   /* Forward information to next layer */
@@ -1124,9 +1131,9 @@ satip_discovery_service_received
   d->location = strdup(location);
   d->server   = strdup(server);
   d->uuid     = strdup(uuid);
-  d->bootid   = strdup(bootid);
-  d->configid = strdup(configid);
-  d->deviceid = strdup(deviceid ? deviceid : "");
+  d->bootid   = strdup(bootid ?: "");
+  d->configid = strdup(configid ?: "");
+  d->deviceid = strdup(deviceid ?: "");
   if (urlparse(d->location, &d->url)) {
     satip_discovery_destroy(d, 0);
     return;
@@ -1136,8 +1143,8 @@ satip_discovery_service_received
   i = 1;
   if (!satip_discovery_find(d) && !satip_device_find(d->uuid)) {
     TAILQ_INSERT_TAIL(&satip_discoveries, d, disc_link);
-    satip_discoveries_count++;
-    gtimer_arm_ms(&satip_discovery_timerq, satip_discovery_timerq_cb, NULL, 250);
+    atomic_add(&satip_discoveries_count, 1);
+    mtimer_arm_rel(&satip_discovery_timerq, satip_discovery_timerq_cb, NULL, ms2mono(250));
     i = 0;
   }
   pthread_mutex_unlock(&global_lock);
@@ -1151,7 +1158,7 @@ add_uuid:
   /* if new uuid was discovered, retrigger MSEARCH */
   pthread_mutex_lock(&global_lock);
   if (!satip_device_find(uuid))
-    gtimer_arm(&satip_discovery_timer, satip_discovery_timer_cb, NULL, 5);
+    mtimer_arm_rel(&satip_discovery_timer, satip_discovery_timer_cb, NULL, sec2mono(5));
   pthread_mutex_unlock(&global_lock);
 }
 
@@ -1178,7 +1185,7 @@ satip_discovery_static(const char *descurl)
   d->configid = strdup("");
   d->deviceid = strdup("");
   TAILQ_INSERT_TAIL(&satip_discoveries, d, disc_link);
-  satip_discoveries_count++;
+  atomic_add(&satip_discoveries_count, 1);
   satip_discovery_timerq_cb(NULL);
 }
 
@@ -1213,8 +1220,8 @@ ST: urn:ses-com:device:SatIPServer:1\r\n"
   upnp_send(&q, NULL, 0, 0);
   htsbuf_queue_flush(&q);
 
-  gtimer_arm_ms(&satip_discovery_msearch_timer, satip_discovery_send_msearch,
-                (void *)(intptr_t)(attempt + 1), attempt * 11);
+  mtimer_arm_rel(&satip_discovery_msearch_timer, satip_discovery_send_msearch,
+                 (void *)(intptr_t)(attempt + 1), ms2mono(attempt * 11));
 #undef MSG
 }
 
@@ -1223,20 +1230,21 @@ satip_discovery_static_timer_cb(void *aux)
 {
   int i;
 
-  if (!tvheadend_running)
+  if (!tvheadend_is_running())
     return;
   for (i = 0; i < satip_static_clients->num; i++)
     satip_discovery_static(satip_static_clients->str[i]);
-  gtimer_arm(&satip_discovery_static_timer, satip_discovery_static_timer_cb, NULL, 3600);
+  mtimer_arm_rel(&satip_discovery_static_timer, satip_discovery_static_timer_cb, NULL, sec2mono(3600));
 }
 
 static void
 satip_discovery_timer_cb(void *aux)
 {
-  if (!tvheadend_running)
+  if (!tvheadend_is_running())
     return;
-  if (!upnp_running) {
-    gtimer_arm(&satip_discovery_timer, satip_discovery_timer_cb, NULL, 1);
+  if (!atomic_get(&upnp_running)) {
+    mtimer_arm_rel(&satip_discovery_timer, satip_discovery_timer_cb,
+                   NULL, sec2mono(1));
     return;
   }
   if (satip_discovery_service == NULL) {
@@ -1248,7 +1256,8 @@ satip_discovery_timer_cb(void *aux)
   }
   if (satip_discovery_service)
     satip_discovery_send_msearch((void *)1);
-  gtimer_arm(&satip_discovery_timer, satip_discovery_timer_cb, NULL, 3600);
+  mtimer_arm_rel(&satip_discovery_timer, satip_discovery_timer_cb,
+                 NULL, sec2mono(3600));
 }
 
 void
@@ -1256,8 +1265,10 @@ satip_device_discovery_start( void )
 {
   if (!satip_enabled)
     return;
-  gtimer_arm(&satip_discovery_timer, satip_discovery_timer_cb, NULL, 1);
-  gtimer_arm(&satip_discovery_static_timer, satip_discovery_static_timer_cb, NULL, 1);
+  mtimer_arm_rel(&satip_discovery_timer, satip_discovery_timer_cb,
+                 NULL, sec2mono(1));
+  mtimer_arm_rel(&satip_discovery_static_timer, satip_discovery_static_timer_cb,
+                 NULL, sec2mono(1));
 }
 
 /*
@@ -1266,6 +1277,17 @@ satip_device_discovery_start( void )
 
 void satip_init ( int nosatip, str_list_t *clients )
 {
+  idclass_register(&satip_device_class);
+
+  idclass_register(&satip_frontend_class);
+  idclass_register(&satip_frontend_dvbt_class);
+  idclass_register(&satip_frontend_dvbs_class);
+  idclass_register(&satip_frontend_dvbs_slave_class);
+  idclass_register(&satip_frontend_atsc_t_class);
+  idclass_register(&satip_frontend_atsc_c_class);
+
+  idclass_register(&satip_satconf_class);
+
   satip_enabled = !nosatip;
   TAILQ_INIT(&satip_discoveries);
   satip_static_clients = clients;

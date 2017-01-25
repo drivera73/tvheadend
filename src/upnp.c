@@ -88,7 +88,7 @@ upnp_send( htsbuf_queue_t *q, struct sockaddr_storage *storage,
 {
   upnp_data_t *data;
 
-  if (!upnp_running)
+  if (!atomic_get(&upnp_running))
     return;
   data = calloc(1, sizeof(upnp_data_t));
   htsbuf_queue_init(&data->queue, 0);
@@ -137,12 +137,12 @@ upnp_thread( void *aux )
   size_t size;
   int r, delay_ms;
 
-  multicast = udp_bind("upnp", "upnp_thread_multicast",
+  multicast = udp_bind(LS_UPNP, "upnp_thread_multicast",
                        "239.255.255.250", 1900,
                        NULL, 32*1024, 32*1024);
   if (multicast == NULL || multicast == UDP_FATAL_ERROR)
     goto error;
-  unicast = udp_bind("upnp", "upnp_thread_unicast", bindaddr, 0,
+  unicast = udp_bind(LS_UPNP, "upnp_thread_unicast", bindaddr, 0,
                      NULL, 32*1024, 32*1024);
   if (unicast == NULL || unicast == UDP_FATAL_ERROR)
     goto error;
@@ -158,7 +158,7 @@ upnp_thread( void *aux )
 
   delay_ms = 0;
 
-  while (upnp_running && multicast->fd >= 0) {
+  while (atomic_get(&upnp_running) && multicast->fd >= 0) {
     r = tvhpoll_wait(poll, ev, 2, delay_ms ?: 1000);
     if (r == 0) /* timeout */
       delay_ms = 0;
@@ -172,10 +172,10 @@ upnp_thread( void *aux )
         if (size > 0 && tvhtrace_enabled()) {
           char tbuf[256];
           inet_ntop(ip.ss_family, IP_IN_ADDR(ip), tbuf, sizeof(tbuf));
-          tvhtrace("upnp", "%s - received data from %s:%hu [size=%zi]",
+          tvhtrace(LS_UPNP, "%s - received data from %s:%hu [size=%zi]",
                    conn == multicast ? "multicast" : "unicast",
                    tbuf, (unsigned short) IP_PORT(ip), size);
-          tvhlog_hexdump("upnp", buf, size);
+          tvhlog_hexdump(LS_UPNP, buf, size);
         }
         /* TODO: a filter */
         TAILQ_FOREACH(us, &upnp_services, us_link)
@@ -216,7 +216,7 @@ upnp_thread( void *aux )
     pthread_mutex_unlock(&upnp_lock);
     if (data == NULL)
       break;
-    usleep((long)data->delay_ms * 1000);
+    tvh_safe_usleep((long)data->delay_ms * 1000);
     upnp_dump_data(data);
     udp_write_queue(unicast, &data->queue, &data->storage);
     htsbuf_queue_flush(&data->queue);
@@ -224,7 +224,7 @@ upnp_thread( void *aux )
   }
 
 error:
-  upnp_running = 0;
+  atomic_set(&upnp_running, 0);
   tvhpoll_destroy(poll);
   udp_close(unicast);
   udp_close(multicast);
@@ -248,7 +248,7 @@ upnp_server_init(const char *bindaddr)
   pthread_mutex_init(&upnp_lock, NULL);
   TAILQ_INIT(&upnp_data_write);
   TAILQ_INIT(&upnp_services);
-  upnp_running = 1;
+  atomic_set(&upnp_running, 1);
   tvhthread_create(&upnp_tid, NULL, upnp_thread, (char *)bindaddr, "upnp");
 }
 
@@ -258,7 +258,7 @@ upnp_server_done(void)
   upnp_data_t *data;
   upnp_service_t *us;
 
-  upnp_running = 0;
+  atomic_set(&upnp_running, 0);
   pthread_kill(upnp_tid, SIGTERM);
   pthread_join(upnp_tid, NULL);
   while ((us = TAILQ_FIRST(&upnp_services)) != NULL)

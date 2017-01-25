@@ -58,7 +58,7 @@ typedef struct spawn {
   LIST_ENTRY(spawn) link;
   pid_t pid;
   const char *name;
-  time_t killed;
+  int64_t killed;
 } spawn_t;
 
 static void spawn_reaper(void);
@@ -92,7 +92,7 @@ spawn_pipe_read( th_pipe_t *p, char **_buf, int level )
       break;
     }
     buf[len + r] = '\0';
-    tvhlog_hexdump("spawn", buf + len, r);
+    tvhlog_hexdump(LS_SPAWN, buf + len, r);
     while (1) {
       s = buf;
       while (*s && *s != '\n' && *s != '\r')
@@ -101,11 +101,11 @@ spawn_pipe_read( th_pipe_t *p, char **_buf, int level )
         break;
       *s++ = '\0';
       if (buf[0])
-        tvhlog(level, "spawn", "%s", buf);
+        tvhlog(level, LS_SPAWN, "%s", buf);
       memmove(buf, s, strlen(s) + 1);
     }
     if (strlen(buf) == SPAWN_PIPE_READ_SIZE - 1) {
-      tvherror("spawn", "pipe buffer full");
+      tvherror(LS_SPAWN, "pipe buffer full");
       buf[0] = '\0';
     }
   }
@@ -127,7 +127,7 @@ spawn_pipe_thread(void *aux)
   ev[1].data.ptr = &spawn_pipe_error;
   tvhpoll_add(efd, ev, 2);
 
-  while (spawn_pipe_running) {
+  while (atomic_get(&spawn_pipe_running)) {
 
     nfds = tvhpoll_wait(efd, ev, 2, 500);
 
@@ -301,7 +301,7 @@ spawn_reaper(void)
   /* forced kill for expired PIDs */
   pthread_mutex_lock(&spawn_mutex);
   LIST_FOREACH(s, &spawns, link)
-    if (s->killed && s->killed < dispatch_clock) {
+    if (s->killed && s->killed < mclk()) {
       /* kill the whole process group */
       kill(-(s->pid), SIGKILL);
     }
@@ -326,7 +326,7 @@ spawn_kill(pid_t pid, int sig, int timeout)
         break;
     if (s) {
       if (!s->killed)
-        s->killed = dispatch_clock_update(NULL) + MINMAX(timeout, 5, 3600);
+        s->killed = mclk() + sec2mono(MINMAX(timeout, 5, 3600));
       /* kill the whole process group */
       r = kill(-pid, sig);
       if (r < 0)
@@ -508,7 +508,7 @@ spawn_and_give_stdout(const char *prog, char *argv[], char *envp[],
 
   if(p == -1) {
     pthread_mutex_unlock(&fork_lock);
-    tvherror("spawn", "Unable to fork() for \"%s\" -- %s",
+    tvherror(LS_SPAWN, "Unable to fork() for \"%s\" -- %s",
              prog, strerror(errno));
     return -1;
   }
@@ -591,7 +591,7 @@ spawnv(const char *prog, char *argv[], pid_t *pid, int redir_stdout, int redir_s
 
   if(p == -1) {
     pthread_mutex_unlock(&fork_lock);
-    tvherror("spawn", "Unable to fork() for \"%s\" -- %s",
+    tvherror(LS_SPAWN, "Unable to fork() for \"%s\" -- %s",
 	     prog, strerror(errno));
     return -1;
   }
@@ -643,7 +643,7 @@ void spawn_init(void)
 {
   tvh_pipe(O_NONBLOCK, &spawn_pipe_info);
   tvh_pipe(O_NONBLOCK, &spawn_pipe_error);
-  spawn_pipe_running = 1;
+  atomic_set(&spawn_pipe_running, 1);
   pthread_create(&spawn_pipe_tid, NULL, spawn_pipe_thread, NULL);
 }
 
@@ -651,7 +651,7 @@ void spawn_done(void)
 {
   spawn_t *s;
 
-  spawn_pipe_running = 0;
+  atomic_set(&spawn_pipe_running, 0);
   pthread_kill(spawn_pipe_tid, SIGTERM);
   pthread_join(spawn_pipe_tid, NULL);
   tvh_pipe_close(&spawn_pipe_error);

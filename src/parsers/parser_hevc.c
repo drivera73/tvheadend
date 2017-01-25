@@ -149,34 +149,46 @@ static void hvcc_update_ptl(HEVCDecoderConfigurationRecord *hvcc,
     hvcc->general_constraint_indicator_flags &= ptl->constraint_indicator_flags;
 }
 
-static void hvcc_parse_ptl(bitstream_t *gb,
-                           HEVCDecoderConfigurationRecord *hvcc,
-                           unsigned int max_sub_layers_minus1)
+static int hvcc_parse_ptl(bitstream_t *gb,
+                          HEVCDecoderConfigurationRecord *hvcc,
+                          unsigned int max_sub_layers)
 {
     unsigned int i;
     HVCCProfileTierLevel general_ptl;
     uint8_t sub_layer_profile_present_flag[MAX_SUB_LAYERS];
     uint8_t sub_layer_level_present_flag[MAX_SUB_LAYERS];
 
+    if (remaining_bits(gb) < 2+1+5 + 32 + 4 + 16 + 16 + 12)
+      return -1;
+
     general_ptl.profile_space               = read_bits(gb, 2);
     general_ptl.tier_flag                   = read_bits1(gb);
     general_ptl.profile_idc                 = read_bits(gb, 5);
     general_ptl.profile_compatibility_flags = read_bits(gb, 32);
+    if (general_ptl.profile_idc == 0) {
+      for (i = 0; i < 32; i++)
+        if (general_ptl.profile_compatibility_flags & (1 << (31-i)))
+          general_ptl.profile_idc = i;
+    }
     general_ptl.constraint_indicator_flags  = read_bits64(gb, 48);
+
+    if (remaining_bits(gb) < 8 + (8*2 * (max_sub_layers - 1 > 0)))
+      return -1;
+
     general_ptl.level_idc                   = read_bits(gb, 8);
     if (hvcc)
         hvcc_update_ptl(hvcc, &general_ptl);
 
-    for (i = 0; i < max_sub_layers_minus1; i++) {
+    for (i = 0; i < max_sub_layers - 1; i++) {
         sub_layer_profile_present_flag[i] = read_bits1(gb);
         sub_layer_level_present_flag[i]   = read_bits1(gb);
     }
 
-    if (max_sub_layers_minus1 > 0)
-        for (i = max_sub_layers_minus1; i < 8; i++)
+    if (max_sub_layers - 1 > 0)
+        for (i = max_sub_layers - 1; i < 8; i++)
             skip_bits(gb, 2); // reserved_zero_2bits[i]
 
-    for (i = 0; i < max_sub_layers_minus1; i++) {
+    for (i = 0; i < max_sub_layers - 1; i++) {
         if (sub_layer_profile_present_flag[i]) {
             /*
              * sub_layer_profile_space[i]                     u(2)
@@ -197,15 +209,16 @@ static void hvcc_parse_ptl(bitstream_t *gb,
         if (sub_layer_level_present_flag[i])
             skip_bits(gb, 8);
     }
+    return 0;
 }
 
 static void skip_sub_layer_hrd_parameters(bitstream_t *gb,
-                                          unsigned int cpb_cnt_minus1,
+                                          unsigned int cpb_cnt,
                                           uint8_t sub_pic_hrd_params_present_flag)
 {
     unsigned int i;
 
-    for (i = 0; i <= cpb_cnt_minus1; i++) {
+    for (i = 0; i < cpb_cnt; i++) {
         read_golomb_ue(gb); // bit_rate_value_minus1
         read_golomb_ue(gb); // cpb_size_value_minus1
 
@@ -219,7 +232,7 @@ static void skip_sub_layer_hrd_parameters(bitstream_t *gb,
 }
 
 static int skip_hrd_parameters(bitstream_t *gb, uint8_t cprms_present_flag,
-                                unsigned int max_sub_layers_minus1)
+                                unsigned int max_sub_layers)
 {
     unsigned int i;
     uint8_t sub_pic_hrd_params_present_flag = 0;
@@ -261,8 +274,8 @@ static int skip_hrd_parameters(bitstream_t *gb, uint8_t cprms_present_flag,
         }
     }
 
-    for (i = 0; i <= max_sub_layers_minus1; i++) {
-        unsigned int cpb_cnt_minus1            = 0;
+    for (i = 0; i < max_sub_layers; i++) {
+        unsigned int cpb_cnt                   = 0;
         uint8_t low_delay_hrd_flag             = 0;
         uint8_t fixed_pic_rate_within_cvs_flag = 0;
         uint8_t fixed_pic_rate_general_flag    = read_bits1(gb);
@@ -276,18 +289,16 @@ static int skip_hrd_parameters(bitstream_t *gb, uint8_t cprms_present_flag,
             low_delay_hrd_flag = read_bits1(gb);
 
         if (!low_delay_hrd_flag) {
-            cpb_cnt_minus1 = read_golomb_ue(gb);
-            if (cpb_cnt_minus1 > 31)
+            cpb_cnt = read_golomb_ue(gb) + 1;
+            if (cpb_cnt > 32)
                 return -1;
         }
 
         if (nal_hrd_parameters_present_flag)
-            skip_sub_layer_hrd_parameters(gb, cpb_cnt_minus1,
-                                          sub_pic_hrd_params_present_flag);
+            skip_sub_layer_hrd_parameters(gb, cpb_cnt, sub_pic_hrd_params_present_flag);
 
         if (vcl_hrd_parameters_present_flag)
-            skip_sub_layer_hrd_parameters(gb, cpb_cnt_minus1,
-                                          sub_pic_hrd_params_present_flag);
+            skip_sub_layer_hrd_parameters(gb, cpb_cnt, sub_pic_hrd_params_present_flag);
     }
 
     return 0;
@@ -304,7 +315,7 @@ static void skip_timing_info(bitstream_t *gb)
 
 static void hvcc_parse_vui(bitstream_t *gb,
                            HEVCDecoderConfigurationRecord *hvcc,
-                           unsigned int max_sub_layers_minus1)
+                           unsigned int max_sub_layers)
 {
     unsigned int min_spatial_segmentation_idc;
 
@@ -350,7 +361,7 @@ static void hvcc_parse_vui(bitstream_t *gb,
         skip_timing_info(gb);
 
         if (read_bits1(gb)) // vui_hrd_parameters_present_flag
-            skip_hrd_parameters(gb, 1, max_sub_layers_minus1);
+            skip_hrd_parameters(gb, 1, max_sub_layers);
     }
 
     if (read_bits1(gb)) { // bitstream_restriction_flag
@@ -390,7 +401,7 @@ static void skip_sub_layer_ordering_info(bitstream_t *gb)
 static int hvcc_parse_vps(bitstream_t *gb,
                           HEVCDecoderConfigurationRecord *hvcc)
 {
-    unsigned int vps_max_sub_layers_minus1;
+    unsigned int vps_max_sub_layers;
 
     /*
      * vps_video_parameter_set_id u(4)
@@ -399,7 +410,7 @@ static int hvcc_parse_vps(bitstream_t *gb,
      */
     skip_bits(gb, 12);
 
-    vps_max_sub_layers_minus1 = read_bits(gb, 3);
+    vps_max_sub_layers = read_bits(gb, 3) + 1;
 
     /*
      * numTemporalLayers greater than 1 indicates that the stream to which this
@@ -409,8 +420,7 @@ static int hvcc_parse_vps(bitstream_t *gb,
      * indicates that the stream is not temporally scalable. Value 0 indicates
      * that it is unknown whether the stream is temporally scalable.
      */
-    hvcc->numTemporalLayers = MAX(hvcc->numTemporalLayers,
-                                  vps_max_sub_layers_minus1 + 1);
+    hvcc->numTemporalLayers = MAX(hvcc->numTemporalLayers, vps_max_sub_layers);
 
     /*
      * vps_temporal_id_nesting_flag u(1)
@@ -418,7 +428,8 @@ static int hvcc_parse_vps(bitstream_t *gb,
      */
     skip_bits(gb, 17);
 
-    hvcc_parse_ptl(gb, hvcc, vps_max_sub_layers_minus1);
+    if (hvcc_parse_ptl(gb, hvcc, vps_max_sub_layers))
+      return -1;
 
     /* nothing useful for hvcC past this point */
     return 0;
@@ -513,12 +524,12 @@ static int parse_rps(bitstream_t *gb, unsigned int rps_idx,
 static int hvcc_parse_sps(bitstream_t *gb,
                           HEVCDecoderConfigurationRecord *hvcc)
 {
-    unsigned int i, sps_max_sub_layers_minus1, log2_max_pic_order_cnt_lsb_minus4;
+    unsigned int i, sps_max_sub_layers, log2_max_pic_order_cnt_lsb_minus4;
     unsigned int num_short_term_ref_pic_sets, num_delta_pocs[MAX_SHORT_TERM_RPS_COUNT];
 
     skip_bits(gb, 4); // sps_video_parameter_set_id
 
-    sps_max_sub_layers_minus1 = read_bits (gb, 3);
+    sps_max_sub_layers = read_bits (gb, 3) + 1;
 
     /*
      * numTemporalLayers greater than 1 indicates that the stream to which this
@@ -528,12 +539,11 @@ static int hvcc_parse_sps(bitstream_t *gb,
      * indicates that the stream is not temporally scalable. Value 0 indicates
      * that it is unknown whether the stream is temporally scalable.
      */
-    hvcc->numTemporalLayers = MAX(hvcc->numTemporalLayers,
-                                  sps_max_sub_layers_minus1 + 1);
+    hvcc->numTemporalLayers = MAX(hvcc->numTemporalLayers, sps_max_sub_layers);
 
     hvcc->temporalIdNested = read_bits1(gb);
 
-    hvcc_parse_ptl(gb, hvcc, sps_max_sub_layers_minus1);
+    hvcc_parse_ptl(gb, hvcc, sps_max_sub_layers);
 
     read_golomb_ue(gb); // sps_seq_parameter_set_id
 
@@ -557,8 +567,8 @@ static int hvcc_parse_sps(bitstream_t *gb,
     log2_max_pic_order_cnt_lsb_minus4 = read_golomb_ue(gb);
 
     /* sps_sub_layer_ordering_info_present_flag */
-    i = read_bits1(gb) ? 0 : sps_max_sub_layers_minus1;
-    for (; i <= sps_max_sub_layers_minus1; i++)
+    i = read_bits1(gb) ? 1 : sps_max_sub_layers;
+    for (; i < sps_max_sub_layers; i++)
         skip_sub_layer_ordering_info(gb);
 
     read_golomb_ue(gb); // log2_min_luma_coding_block_size_minus3
@@ -608,7 +618,7 @@ static int hvcc_parse_sps(bitstream_t *gb,
     skip_bits1(gb); // strong_intra_smoothing_enabled_flag
 
     if (read_bits1(gb)) // vui_parameters_present_flag
-        hvcc_parse_vui(gb, hvcc, sps_max_sub_layers_minus1);
+        hvcc_parse_vui(gb, hvcc, sps_max_sub_layers);
 
     /* nothing useful for hvcC past this point */
     return 0;
@@ -885,49 +895,49 @@ static int hvcc_write(sbuf_t *pb, HEVCDecoderConfigurationRecord *hvcc)
     hvcc->avgFrameRate      = 0;
     hvcc->constantFrameRate = 0;
 
-    tvhtrace("hevc", "configurationVersion:                %"PRIu8,
+    tvhtrace(LS_HEVC, "configurationVersion:                %"PRIu8,
             hvcc->configurationVersion);
-    tvhtrace("hevc", "general_profile_space:               %"PRIu8,
+    tvhtrace(LS_HEVC, "general_profile_space:               %"PRIu8,
             hvcc->general_profile_space);
-    tvhtrace("hevc",  "general_tier_flag:                   %"PRIu8,
+    tvhtrace(LS_HEVC,  "general_tier_flag:                   %"PRIu8,
             hvcc->general_tier_flag);
-    tvhtrace("hevc",  "general_profile_idc:                 %"PRIu8,
+    tvhtrace(LS_HEVC,  "general_profile_idc:                 %"PRIu8,
             hvcc->general_profile_idc);
-    tvhtrace("hevc", "general_profile_compatibility_flags: 0x%08"PRIx32,
+    tvhtrace(LS_HEVC, "general_profile_compatibility_flags: 0x%08"PRIx32,
             hvcc->general_profile_compatibility_flags);
-    tvhtrace("hevc", "general_constraint_indicator_flags:  0x%012"PRIx64,
+    tvhtrace(LS_HEVC, "general_constraint_indicator_flags:  0x%012"PRIx64,
             hvcc->general_constraint_indicator_flags);
-    tvhtrace("hevc",  "general_level_idc:                   %"PRIu8,
+    tvhtrace(LS_HEVC,  "general_level_idc:                   %"PRIu8,
             hvcc->general_level_idc);
-    tvhtrace("hevc",  "min_spatial_segmentation_idc:        %"PRIu16,
+    tvhtrace(LS_HEVC,  "min_spatial_segmentation_idc:        %"PRIu16,
             hvcc->min_spatial_segmentation_idc);
-    tvhtrace("hevc",  "parallelismType:                     %"PRIu8,
+    tvhtrace(LS_HEVC,  "parallelismType:                     %"PRIu8,
             hvcc->parallelismType);
-    tvhtrace("hevc",  "chromaFormat:                        %"PRIu8,
+    tvhtrace(LS_HEVC,  "chromaFormat:                        %"PRIu8,
             hvcc->chromaFormat);
-    tvhtrace("hevc",  "bitDepthLumaMinus8:                  %"PRIu8,
+    tvhtrace(LS_HEVC,  "bitDepthLumaMinus8:                  %"PRIu8,
             hvcc->bitDepthLumaMinus8);
-    tvhtrace("hevc",  "bitDepthChromaMinus8:                %"PRIu8,
+    tvhtrace(LS_HEVC,  "bitDepthChromaMinus8:                %"PRIu8,
             hvcc->bitDepthChromaMinus8);
-    tvhtrace("hevc",  "avgFrameRate:                        %"PRIu16,
+    tvhtrace(LS_HEVC,  "avgFrameRate:                        %"PRIu16,
             hvcc->avgFrameRate);
-    tvhtrace("hevc",  "constantFrameRate:                   %"PRIu8,
+    tvhtrace(LS_HEVC,  "constantFrameRate:                   %"PRIu8,
             hvcc->constantFrameRate);
-    tvhtrace("hevc",  "numTemporalLayers:                   %"PRIu8,
+    tvhtrace(LS_HEVC,  "numTemporalLayers:                   %"PRIu8,
             hvcc->numTemporalLayers);
-    tvhtrace("hevc",  "temporalIdNested:                    %"PRIu8,
+    tvhtrace(LS_HEVC,  "temporalIdNested:                    %"PRIu8,
             hvcc->temporalIdNested);
-    tvhtrace("hevc",  "lengthSizeMinusOne:                  %"PRIu8,
+    tvhtrace(LS_HEVC,  "lengthSizeMinusOne:                  %"PRIu8,
             hvcc->lengthSizeMinusOne);
-    tvhtrace("hevc",  "numOfArrays:                         %"PRIu8,
+    tvhtrace(LS_HEVC,  "numOfArrays:                         %"PRIu8,
             hvcc->numOfArrays);
     for (i = 0; i < hvcc->numOfArrays; i++) {
-        tvhtrace("hevc", "NAL_unit_type[%"PRIu8"]:                    %"PRIu8,
+        tvhtrace(LS_HEVC, "NAL_unit_type[%"PRIu8"]:                    %"PRIu8,
                 i, hvcc->array[i].NAL_unit_type);
-        tvhtrace("hevc", "numNalus[%"PRIu8"]:                         %"PRIu16,
+        tvhtrace(LS_HEVC, "numNalus[%"PRIu8"]:                         %"PRIu16,
                 i, hvcc->array[i].numNalus);
         for (j = 0; j < hvcc->array[i].numNalus; j++)
-            tvhtrace("hevc",
+            tvhtrace(LS_HEVC,
                     "nalUnitLength[%"PRIu8"][%"PRIu16"]:                 %"PRIu16,
                     i, j, hvcc->array[i].nalUnitLength[j]);
     }
@@ -1178,11 +1188,7 @@ th_pkt_t *
 hevc_convert_pkt(th_pkt_t *src)
 {
   sbuf_t payload;
-  th_pkt_t *pkt = malloc(sizeof(*pkt));
-
-  *pkt = *src;
-  pkt->pkt_refcount = 1;
-  pkt->pkt_meta = NULL;
+  th_pkt_t *pkt = pkt_copy_nodata(src);
 
   sbuf_init(&payload);
 
@@ -1313,7 +1319,7 @@ hevc_decode_vps(elementary_stream_t *st, bitstream_t *bs)
   if (max_sub_layers > MAX_SUB_LAYERS)
     return;
 
-  hvcc_parse_ptl(bs, NULL, max_sub_layers - 1);
+  hvcc_parse_ptl(bs, NULL, max_sub_layers);
 
   sub_layer_ordering_info_present = read_bits1(bs);
   u = sub_layer_ordering_info_present ? 0 : max_sub_layers - 1;
@@ -1445,7 +1451,7 @@ hevc_decode_sps(elementary_stream_t *st, bitstream_t *bs)
     return;
   skip_bits1(bs);     /* temporal_id_nesting */
 
-  hvcc_parse_ptl(bs, NULL, max_sub_layers - 1);
+  hvcc_parse_ptl(bs, NULL, max_sub_layers);
 
   sps_id = read_golomb_ue(bs);
   if (sps_id >= MAX_SPS_COUNT)
@@ -1504,7 +1510,7 @@ hevc_decode_sps(elementary_stream_t *st, bitstream_t *bs)
     if (read_bits1(bs)) { /* scaling_list_data */
       for (u = 0; u < 4; u++) {
         for (v = 0; v < 6; v += ((u == 3) ? 3 : 1)) {
-          if (read_bits1(bs)) { /* scaling_list_pred_mode */
+          if (!read_bits1(bs)) { /* scaling_list_pred_mode */
             read_golomb_ue(bs); /* delta */
           } else {
             if (u > 1)
@@ -1671,6 +1677,7 @@ hevc_decode_slice_header(struct elementary_stream *st, bitstream_t *bs,
     u = ilog2((v - 1) << 1);
     if (u >= v)
       return -1;
+    skip_bits(bs, u);
   }
 
   if (dependent_slice_segment)

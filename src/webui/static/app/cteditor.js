@@ -19,9 +19,6 @@ tvheadend.cteditor = function(panel, index)
         sort: {
           field: 'name',
           direction: 'ASC'
-        },
-        help: function() {
-            new tvheadend.help(_('Channel Tags'), 'config_tags.html');
         }
     });
 
@@ -33,11 +30,43 @@ tvheadend.cteditor = function(panel, index)
  */
 tvheadend.bouquet = function(panel, index)
 {
-    var list0 = 'name,maptoch,mapnolcn,lcn_off,mapnoname,mapradio,' +
-                'chtag,source,services_count,services_seen,comment';
+    var list0 = 'name,maptoch,lcn_off,mapopt,chtag,source,services_count,services_seen,comment';
     var list  = 'enabled,rescan,' + list0;
     var elist = 'enabled,rescan,ext_url,' + list0;
     var alist = 'enabled,ext_url,' + list0;
+
+    var scanButton = {
+        name: 'scan',
+        builder: function() {
+            return new Ext.Toolbar.Button({
+                tooltip: _('Rescan the mux for changes to the bouquet.'),
+                iconCls: 'find',
+                text: _('Force Scan'),
+                disabled: true
+            });
+        },
+        callback: function(conf, e, store, select) {
+            var r = select.getSelections();
+            if (r && r.length > 0) {
+                var uuids = [];
+                for (var i = 0; i < r.length; i++)
+                    uuids.push(r[i].id);
+                tvheadend.Ajax({
+                    url: 'api/bouquet/scan',
+                    params: {
+                        uuid: Ext.encode(uuids)
+                    },    
+                    success: function(d) {
+                        store.reload();
+                    }
+                });
+            }
+        }
+    };
+
+    function selected(s, abuttons) {
+        abuttons.scan.setDisabled(!s || s.length <= 0);
+    }
 
     tvheadend.idnode_grid(panel, {
         url: 'api/bouquet',
@@ -45,16 +74,14 @@ tvheadend.bouquet = function(panel, index)
         titleP: _('Bouquets'),
         iconCls: 'bouquets',
         tabIndex: index,
+        tbar: [scanButton],
         columns: {
             enabled:        { width: 50 },
             rescan:         { width: 50 },
             name:           { width: 200 },
-            maptoch:        { width: 100 },
-            mapnolcn:       { width: 100 },
-            mapradio:       { width: 100 },
             lcn_off:        { width: 100 },
-            mapnoname:      { width: 100 },
-            chtag:          { width: 100 },
+            mapopt:         { width: 150 },
+            chtag:          { width: 150 },
             source:         { width: 200 },
             services_count: { width: 100 },
             services_seen:  { width: 100 },
@@ -68,12 +95,10 @@ tvheadend.bouquet = function(panel, index)
         },
         del: true,
         edit: { params: { list: elist } },
+        selected: selected,
         sort: {
           field: 'name',
           direction: 'ASC'
-        },
-        help: function() {
-            new tvheadend.help(_('Bouquets'), 'config_bouquet.html');
         }
     });
 

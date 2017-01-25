@@ -42,13 +42,14 @@ tsfile_mux_instance_create
   mmi->mmi_tsfile_path    = strdup(path);
   mmi->mmi_tsfile_pcr_pid = MPEGTS_PID_NONE;
   mmi->tii_delete         = tsfile_mux_instance_delete;
-  tvhtrace("tsfile", "mmi created %p path %s", mmi, mmi->mmi_tsfile_path);
+  tvhtrace(LS_TSFILE, "mmi created %p path %s", mmi, mmi->mmi_tsfile_path);
   return mmi;
 }
 
-static void
-iptv_mux_config_save ( mpegts_mux_t *m )
+static htsmsg_t *
+iptv_mux_config_save ( mpegts_mux_t *m, char *filename, size_t fsize )
 {
+  return NULL;
 }
 
 mpegts_mux_t *
@@ -58,7 +59,7 @@ tsfile_mux_create ( const char *uuid, mpegts_network_t *mn )
     = mpegts_mux_create1(uuid, mn, MPEGTS_ONID_NONE, MPEGTS_TSID_NONE, NULL);
   mm->mm_config_save = iptv_mux_config_save;
   mm->mm_epg = MM_EPG_DISABLE;
-  tvhtrace("tsfile", "mm created %p", mm);
+  tvhtrace(LS_TSFILE, "mm created %p", mm);
   return mm;
 }
 

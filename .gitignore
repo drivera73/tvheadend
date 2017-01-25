@@ -3,6 +3,7 @@ build.*
 
 src/version.c
 src/tvh_locale_inc.c
+src/docs_inc.[ch]
 src/webui/extjs-std.c
 src/webui/extjs-debug.c
 src/webui/extjs-tv-std.c
@@ -10,7 +11,7 @@ src/webui/extjs-tv-debug.c
 src/webui/static/tvh.js.gz
 src/webui/static/tvh-tv.css.gz
 src/webui/static/tvh-tv.js.gz
-src/webui/static/tvh.css.gz
+src/webui/static/tvh.*.css.gz
 
 data/dvb-scan
 

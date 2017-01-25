@@ -68,17 +68,19 @@ satip_frontend_signal_cb( void *aux )
                        ((dvb_mux_t *)mmi->mmi_mux)->lm_tuning.dmc_fe_delsys);
     lfe->sf_tables = 1;
   }
+  pthread_mutex_lock(&mmi->tii_stats_mutex);
   sigstat.status_text  = signal2str(lfe->sf_status);
   sigstat.snr          = mmi->tii_stats.snr;
   sigstat.signal       = mmi->tii_stats.signal;
   sigstat.ber          = mmi->tii_stats.ber;
-  sigstat.unc          = mmi->tii_stats.unc;
+  sigstat.unc          = atomic_get(&mmi->tii_stats.unc);
   sigstat.signal_scale = mmi->tii_stats.signal_scale;
   sigstat.snr_scale    = mmi->tii_stats.snr_scale;
   sigstat.ec_bit       = mmi->tii_stats.ec_bit;
   sigstat.tc_bit       = mmi->tii_stats.tc_bit;
   sigstat.ec_block     = mmi->tii_stats.ec_block;
   sigstat.tc_block     = mmi->tii_stats.tc_block;
+  pthread_mutex_unlock(&mmi->tii_stats_mutex);
   sm.sm_type = SMT_SIGNAL_STATUS;
   sm.sm_data = &sigstat;
   LIST_FOREACH(svc, &mmi->mmi_mux->mm_transports, s_active_link) {
@@ -86,7 +88,8 @@ satip_frontend_signal_cb( void *aux )
     streaming_pad_deliver(&svc->s_streaming_pad, streaming_msg_clone(&sm));
     pthread_mutex_unlock(&svc->s_stream_mutex);
   }
-  gtimer_arm_ms(&lfe->sf_monitor_timer, satip_frontend_signal_cb, lfe, 250);
+  mtimer_arm_rel(&lfe->sf_monitor_timer, satip_frontend_signal_cb,
+                 lfe, ms2mono(250));
 }
 
 /* **************************************************************************
@@ -94,10 +97,10 @@ satip_frontend_signal_cb( void *aux )
  * *************************************************************************/
 
 static void
-satip_frontend_class_save ( idnode_t *in )
+satip_frontend_class_changed ( idnode_t *in )
 {
   satip_device_t *la = ((satip_frontend_t*)in)->sf_device;
-  satip_device_save(la);
+  satip_device_changed(la);
 }
 
 static int
@@ -133,12 +136,15 @@ satip_frontend_class_override_enum( void * p, const char *lang )
   return m;
 }
 
+CLASS_DOC(satip_frontend)
+
 const idclass_t satip_frontend_class =
 {
   .ic_super      = &mpegts_input_class,
   .ic_class      = "satip_frontend",
-  .ic_caption    = N_("SAT>IP DVB frontend"),
-  .ic_save       = satip_frontend_class_save,
+  .ic_doc        = tvh_doc_satip_frontend_class,
+  .ic_caption    = N_("SAT>IP DVB Frontend"),
+  .ic_changed    = satip_frontend_class_changed,
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_INT,
@@ -219,7 +225,7 @@ const idclass_t satip_frontend_dvbt_class =
 {
   .ic_super      = &satip_frontend_class,
   .ic_class      = "satip_frontend_dvbt",
-  .ic_caption    = N_("SAT>IP DVB-T frontend"),
+  .ic_caption    = N_("SAT>IP DVB-T Frontend"),
   .ic_properties = (const property_t[]){
     {
       .type     = PT_STR,
@@ -292,9 +298,11 @@ static htsmsg_t *
 satip_frontend_dvbs_class_master_enum( void * self, const char *lang )
 {
   satip_frontend_t *lfe = self, *lfe2;
-  satip_device_t *sd = lfe->sf_device;
   htsmsg_t *m = htsmsg_create_list();
   htsmsg_add_str(m, NULL, N_("This tuner"));
+  if (lfe == NULL)
+    return m;
+  satip_device_t *sd = lfe->sf_device;
   TAILQ_FOREACH(lfe2, &sd->sd_frontends, sf_link)
     if (lfe2 != lfe && lfe2->sf_type == lfe->sf_type)
       htsmsg_add_str(m, NULL, lfe2->mi_name);
@@ -305,7 +313,7 @@ const idclass_t satip_frontend_dvbs_class =
 {
   .ic_super      = &satip_frontend_class,
   .ic_class      = "satip_frontend_dvbs",
-  .ic_caption    = N_("SAT>IP DVB-S frontend"),
+  .ic_caption    = N_("SAT>IP DVB-S Frontend"),
   .ic_get_childs = satip_frontend_dvbs_class_get_childs,
   .ic_properties = (const property_t[]){
     {
@@ -349,8 +357,8 @@ const idclass_t satip_frontend_dvbs_class =
 const idclass_t satip_frontend_dvbs_slave_class =
 {
   .ic_super      = &satip_frontend_class,
-  .ic_class      = "satip_frontend_dvbs",
-  .ic_caption    = N_("SAT>IP DVB-S slave frontend"),
+  .ic_class      = "satip_frontend_dvbs_slave",
+  .ic_caption    = N_("SAT>IP DVB-S Slave Frontend"),
   .ic_properties = (const property_t[]){
     {
       .type     = PT_INT,
@@ -382,7 +390,7 @@ const idclass_t satip_frontend_dvbc_class =
 {
   .ic_super      = &satip_frontend_class,
   .ic_class      = "satip_frontend_dvbc",
-  .ic_caption    = N_("SAT>IP DVB-C frontend"),
+  .ic_caption    = N_("SAT>IP DVB-C Frontend"),
   .ic_properties = (const property_t[]){
     {
       .type     = PT_STR,
@@ -401,7 +409,7 @@ const idclass_t satip_frontend_atsc_t_class =
 {
   .ic_super      = &satip_frontend_class,
   .ic_class      = "satip_frontend_atsc_t",
-  .ic_caption    = N_("SAT>IP ATSC-T frontend"),
+  .ic_caption    = N_("SAT>IP ATSC-T Frontend"),
   .ic_properties = (const property_t[]){
     {}
   }
@@ -411,7 +419,7 @@ const idclass_t satip_frontend_atsc_c_class =
 {
   .ic_super      = &satip_frontend_class,
   .ic_class      = "satip_frontend_atsc_c",
-  .ic_caption    = N_("SAT>IP ATSC-C frontend"),
+  .ic_caption    = N_("SAT>IP ATSC-C Frontend"),
   .ic_properties = (const property_t[]){
     {}
   }
@@ -422,9 +430,9 @@ const idclass_t satip_frontend_atsc_c_class =
  * *************************************************************************/
 
 static int
-satip_frontend_get_weight ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags )
+satip_frontend_get_weight ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags, int weight )
 {
-  return mpegts_input_get_weight(mi, mm, flags);
+  return mpegts_input_get_weight(mi, mm, flags, weight);
 }
 
 static int
@@ -448,23 +456,50 @@ satip_frontend_get_grace ( mpegts_input_t *mi, mpegts_mux_t *mm )
 }
 
 static int
-satip_frontend_match_satcfg ( satip_frontend_t *lfe2, mpegts_mux_t *mm2 )
+satip_frontend_get_max_weight ( satip_frontend_t *lfe, mpegts_mux_t *mm, int flags )
+{
+  satip_frontend_t *lfe2;
+  int w = 0, w2;
+
+  TAILQ_FOREACH(lfe2, &lfe->sf_device->sd_frontends, sf_link) {
+    if (!lfe2->sf_running) continue;
+    if (lfe2->sf_type != DVB_TYPE_S) continue;
+    if (lfe2 != lfe) continue;
+    if (lfe->sf_master != lfe2->sf_number &&
+        lfe2->sf_master != lfe->sf_number) continue;
+    w2 = lfe2->mi_get_weight((mpegts_input_t *)lfe2, mm, flags, 0);
+    if (w2 > w)
+      w = w2;
+  }
+  return w;
+}
+
+int
+satip_frontend_match_satcfg
+  ( satip_frontend_t *lfe2, mpegts_mux_t *mm2, int flags, int weight )
 {
   satip_frontend_t *lfe_master;
-  mpegts_mux_t *mm1;
+  satip_satconf_t *sfc;
+  mpegts_mux_t *mm1 = NULL;
   dvb_mux_conf_t *mc1, *mc2;
-  int position, high1, high2;
+  int weight2, high1, high2;
 
-  if (lfe2->sf_req == NULL || lfe2->sf_req->sf_mmi == NULL)
+  if (!lfe2->sf_running)
     return 0;
 
   lfe_master = lfe2;
   if (lfe2->sf_master)
     lfe_master = satip_frontend_find_by_number(lfe2->sf_device, lfe2->sf_master) ?: lfe2;
 
+  if (weight > 0) {
+    weight2 = satip_frontend_get_max_weight(lfe2, mm2, flags);
+    if (weight2 > 0 && weight2 < weight)
+      return 1;
+  }
+
   mm1 = lfe2->sf_req->sf_mmi->mmi_mux;
-  position = satip_satconf_get_position(lfe2, mm2);
-  if (position <= 0 || lfe_master->sf_position != position)
+  sfc = satip_satconf_get_position(lfe2, mm2, NULL, 0, 0, -1);
+  if (!sfc || lfe_master->sf_position != sfc->sfc_position)
     return 0;
   mc1 = &((dvb_mux_t *)mm1)->lm_tuning;
   mc2 = &((dvb_mux_t *)mm2)->lm_tuning;
@@ -480,37 +515,41 @@ satip_frontend_match_satcfg ( satip_frontend_t *lfe2, mpegts_mux_t *mm2 )
 }
 
 static int
-satip_frontend_is_enabled ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags )
+satip_frontend_is_enabled
+  ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags, int weight )
 {
   satip_frontend_t *lfe = (satip_frontend_t*)mi;
   satip_frontend_t *lfe2;
-  int position;
+  satip_satconf_t *sfc;
 
   lock_assert(&global_lock);
 
-  if (!mpegts_input_is_enabled(mi, mm, flags)) return 0;
-  if (lfe->sf_device->sd_dbus_allow <= 0) return 0;
-  if (lfe->sf_type != DVB_TYPE_S) return 1;
+  if (!mpegts_input_is_enabled(mi, mm, flags, weight))
+    return MI_IS_ENABLED_NEVER;
+  if (lfe->sf_device->sd_dbus_allow <= 0)
+    return MI_IS_ENABLED_NEVER;
+  if (lfe->sf_type != DVB_TYPE_S)
+    return MI_IS_ENABLED_OK;
   /* check if the position is enabled */
-  position = satip_satconf_get_position(lfe, mm);
-  if (position <= 0)
-    return 0;
+  sfc = satip_satconf_get_position(lfe, mm, NULL, 1, flags, weight);
+  if (!sfc) return MI_IS_ENABLED_NEVER;
   /* check if any "blocking" tuner is running */
   TAILQ_FOREACH(lfe2, &lfe->sf_device->sd_frontends, sf_link) {
     if (lfe2 == lfe) continue;
     if (lfe2->sf_type != DVB_TYPE_S) continue;
     if (lfe->sf_master == lfe2->sf_number) {
       if (!lfe2->sf_running)
-        return 0; /* master must be running */
-      return satip_frontend_match_satcfg(lfe2, mm);
+        return MI_IS_ENABLED_RETRY; /* master must be running */
+      return satip_frontend_match_satcfg(lfe2, mm, flags, weight) ?
+             MI_IS_ENABLED_OK : MI_IS_ENABLED_RETRY;
     }
-    if (lfe2->sf_master == lfe->sf_number && lfe2->sf_running) {
-      if (lfe2->sf_req == NULL || lfe2->sf_req->sf_mmi == NULL)
-        return 0;
-      return satip_frontend_match_satcfg(lfe2, mm);
+    if (lfe2->sf_master == lfe->sf_number) {
+      if (lfe2->sf_running)
+        return satip_frontend_match_satcfg(lfe2, mm, flags, weight) ?
+               MI_IS_ENABLED_OK : MI_IS_ENABLED_RETRY;
     }
   }
-  return 1;
+  return MI_IS_ENABLED_OK;
 }
 
 static void
@@ -523,9 +562,9 @@ satip_frontend_stop_mux
 
   mi->mi_display_name(mi, buf1, sizeof(buf1));
   mpegts_mux_nice_name(mmi->mmi_mux, buf2, sizeof(buf2));
-  tvhdebug("satip", "%s - stopping %s", buf1, buf2);
+  tvhdebug(LS_SATIP, "%s - stopping %s", buf1, buf2);
 
-  gtimer_disarm(&lfe->sf_monitor_timer);
+  mtimer_disarm(&lfe->sf_monitor_timer);
 
   /* Stop tune */
   tvh_write(lfe->sf_dvr_pipe.wr, "", 1);
@@ -537,9 +576,37 @@ satip_frontend_stop_mux
     mpegts_pid_done(&tr->sf_pids);
     free(tr);
   }
-  lfe->sf_running  = 0;
+  lfe->sf_running = 0;
   lfe->sf_req = NULL;
   pthread_mutex_unlock(&lfe->sf_dvr_lock);
+}
+
+static int
+satip_frontend_warm_mux
+  ( mpegts_input_t *mi, mpegts_mux_instance_t *mmi )
+{
+  satip_frontend_t *lfe = (satip_frontend_t*)mi;
+  satip_satconf_t *sfc;
+  int r;
+
+  r = mpegts_input_warm_mux(mi, mmi);
+  if (r)
+    return r;
+
+  if (lfe->sf_positions > 0) {
+    sfc = satip_satconf_get_position(lfe, mmi->mmi_mux,
+                                     &lfe->sf_netposhash,
+                                     2, 0, -1);
+    if (sfc) {
+      lfe->sf_position = sfc->sfc_position;
+      lfe->sf_netgroup = sfc->sfc_network_group;
+      lfe->sf_netlimit = MAX(1, sfc->sfc_network_limit);
+    } else {
+      return SM_CODE_TUNING_FAILED;
+    }
+  }
+
+  return 0;
 }
 
 static int
@@ -551,15 +618,9 @@ satip_frontend_start_mux
   satip_tune_req_t *tr;
   char buf1[256], buf2[256];
 
-  if (lfe->sf_positions > 0) {
-    lfe->sf_position = satip_satconf_get_position(lfe, mmi->mmi_mux);
-    if (lfe->sf_position <= 0)
-      return SM_CODE_TUNING_FAILED;
-  }
-
   lfe->mi_display_name((mpegts_input_t*)lfe, buf1, sizeof(buf1));
   mpegts_mux_nice_name(mmi->mmi_mux, buf2, sizeof(buf2));
-  tvhdebug("satip", "%s - starting %s", buf1, buf2);
+  tvhdebug(LS_SATIP, "%s - starting %s", buf1, buf2);
 
   if (!lfe->sf_device->sd_no_univ_lnb &&
       (lm->lm_tuning.dmc_fe_delsys == DVB_SYS_DVBS ||
@@ -567,7 +628,7 @@ satip_frontend_start_mux
     /* Note: assume universal LNB */
     if (lm->lm_tuning.dmc_fe_freq < 10700000 ||
         lm->lm_tuning.dmc_fe_freq > 12750000) {
-      tvhwarn("satip", "DVB-S/S2 frequency %d out of range universal LNB", lm->lm_tuning.dmc_fe_freq);
+      tvhwarn(LS_SATIP, "DVB-S/S2 frequency %d out of range universal LNB", lm->lm_tuning.dmc_fe_freq);
       return SM_CODE_TUNING_FAILED;
     }
   }
@@ -580,18 +641,25 @@ satip_frontend_start_mux
   if (lfe->sf_device->sd_can_weight)
     tr->sf_weight = weight;
 
+  tr->sf_netposhash = lfe->sf_netposhash;
+  tr->sf_netlimit   = lfe->sf_netlimit;
+  tr->sf_netgroup   = lfe->sf_netgroup;
+
   pthread_mutex_lock(&lfe->sf_dvr_lock);
   lfe->sf_req       = tr;
   lfe->sf_running   = 1;
   lfe->sf_tables    = 0;
   lfe->sf_atsc_c    = lm->lm_tuning.dmc_fe_modulation != DVB_MOD_VSB_8;
-  lfe->sf_status    = SIGNAL_NONE;
   pthread_mutex_unlock(&lfe->sf_dvr_lock);
+  pthread_mutex_lock(&mmi->tii_stats_mutex);
+  lfe->sf_status    = SIGNAL_NONE;
+  pthread_mutex_unlock(&mmi->tii_stats_mutex);
 
   /* notify thread that we are ready */
   tvh_write(lfe->sf_dvr_pipe.wr, "s", 1);
 
-  gtimer_arm_ms(&lfe->sf_monitor_timer, satip_frontend_signal_cb, lfe, 50);
+  mtimer_arm_rel(&lfe->sf_monitor_timer, satip_frontend_signal_cb,
+                 lfe, ms2mono(50));
 
   return 0;
 }
@@ -631,6 +699,10 @@ satip_frontend_update_pids
           mpegts_pid_add(&tr->sf_pids, mp->mp_pid, mps->mps_weight);
       }
     }
+    if (lfe->sf_device->sd_pids0)
+      mpegts_pid_add(&tr->sf_pids, 0, MPS_WEIGHT_PMT_SCAN);
+    if (lfe->sf_device->sd_pids21)
+      mpegts_pid_add(&tr->sf_pids, 21, MPS_WEIGHT_PMT_SCAN);
   }
   pthread_mutex_unlock(&lfe->sf_dvr_lock);
 
@@ -724,29 +796,30 @@ satip_frontend_decode_rtcp( satip_frontend_t *lfe, const char *name,
    * -a BER lower than 2x10-4 after Viterbi for DVB-S
    * -a PER lower than 10-7 for DVB-S2
    */
+  pthread_mutex_lock(&mmi->tii_stats_mutex);
   while (len >= 12) {
     if ((rtcp[0] & 0xc0) != 0x80)	        /* protocol version: v2 */
-      return;
+      goto fail;
     l = (((rtcp[2] << 8) | rtcp[3]) + 1) * 4;   /* length of payload */
     if (rtcp[1]  ==  204 && l > 20 &&           /* packet type */
         rtcp[8]  == 'S'  && rtcp[9]  == 'E' &&
         rtcp[10] == 'S'  && rtcp[11] == '1') {
       /* workaround for broken minisatip */
       if (l > len && l - 4 != len)
-        return;
+        goto fail;
       sl = (rtcp[14] << 8) | rtcp[15];
       if (sl > 0 && l - 16 >= sl) {
         rtcp[sl + 16] = '\0';
         s = (char *)rtcp + 16;
-        tvhtrace("satip", "Status string: '%s'", s);
+        tvhtrace(LS_SATIP, "Status string: '%s'", s);
         status = SIGNAL_NONE;
         if (strncmp(s, "ver=0.9;tuner=", 14) == 0 ||
             strncmp(s, "ver=1.2;tuner=", 14) == 0) {
           n = http_tokenize(s + 14, argv, 4, ',');
           if (n < 4)
-            return;
+            goto fail;
           if (atoi(argv[0]) != lfe->sf_number)
-            return;
+            goto fail;
           mmi->tii_stats.signal =
             atoi(argv[1]) * 0xffff / lfe->sf_device->sd_sig_scale;
           mmi->tii_stats.signal_scale =
@@ -765,13 +838,13 @@ satip_frontend_decode_rtcp( satip_frontend_t *lfe, const char *name,
           goto ok;          
         } else if (strncmp(s, "ver=1.0;", 8) == 0) {
           if ((s = strstr(s + 8, ";tuner=")) == NULL)
-            return;
+            goto fail;
           s += 7;
           n = http_tokenize(s, argv, 4, ',');
           if (n < 4)
-            return;
+            goto fail;
           if (atoi(argv[0]) != lfe->sf_number)
-            return;
+            goto fail;
           mmi->tii_stats.signal =
             atoi(argv[1]) * 0xffff / lfe->sf_device->sd_sig_scale;
           mmi->tii_stats.signal_scale =
@@ -785,9 +858,9 @@ satip_frontend_decode_rtcp( satip_frontend_t *lfe, const char *name,
         } else if (strncmp(s, "ver=1.1;tuner=", 14) == 0) {
           n = http_tokenize(s + 14, argv, 4, ',');
           if (n < 4)
-            return;
+            goto fail;
           if (atoi(argv[0]) != lfe->sf_number)
-            return;
+            goto fail;
           mmi->tii_stats.signal =
             atoi(argv[1]) * 0xffff / lfe->sf_device->sd_sig_scale;
           mmi->tii_stats.signal_scale =
@@ -804,7 +877,7 @@ satip_frontend_decode_rtcp( satip_frontend_t *lfe, const char *name,
     rtcp += l;
     len -= l;
   }
-  return;
+  goto fail;
 
 ok:
   if (mmi->tii_stats.snr < 2 && status == SIGNAL_GOOD)
@@ -812,6 +885,8 @@ ok:
   else if (mmi->tii_stats.snr < 4 && status == SIGNAL_GOOD)
     status              = SIGNAL_FAINT;
   lfe->sf_status        = status;
+fail:
+  pthread_mutex_unlock(&mmi->tii_stats_mutex);
 }
 
 static int
@@ -819,10 +894,11 @@ satip_frontend_pid_changed( http_client_t *rtsp,
                             satip_frontend_t *lfe, const char *name )
 {
   satip_tune_req_t *tr;
+  satip_device_t *sd = lfe->sf_device;
   char *add, *del;
   int i, j, r;
-  int max_pids_len = lfe->sf_device->sd_pids_len;
-  int max_pids_count = lfe->sf_device->sd_pids_max;
+  int max_pids_len = sd->sd_pids_len;
+  int max_pids_count = sd->sd_pids_max;
   mpegts_apids_t wpid, padd, pdel;
 
   pthread_mutex_lock(&lfe->sf_dvr_lock);
@@ -848,12 +924,18 @@ all:
     r = satip_rtsp_play(rtsp, "all", NULL, NULL, max_pids_len, tr->sf_weight);
     r = r == 0 ? 1 : r;
 
-  } else if (!lfe->sf_device->sd_pids_deladd ||
+  } else if (!sd->sd_pids_deladd ||
              tr->sf_pids_tuned.all ||
              tr->sf_pids.count == 0) {
 
-    mpegts_pid_weighted(&wpid, &tr->sf_pids, lfe->sf_device->sd_pids_max);
-    j = MIN(wpid.count, lfe->sf_device->sd_pids_max);
+    mpegts_pid_weighted(&wpid, &tr->sf_pids, max_pids_count);
+
+    if (wpid.count > max_pids_count && sd->sd_fullmux_ok) {
+      mpegts_pid_done(&wpid);
+      goto all;
+    }
+
+    j = MIN(wpid.count, max_pids_count);
     add = alloca(1 + j * 5);
     add[0] = '\0';
     for (i = 0; i < j; i++)
@@ -872,13 +954,11 @@ all:
 
   } else {
 
-    mpegts_pid_weighted(&wpid, &tr->sf_pids, lfe->sf_device->sd_pids_max);
+    mpegts_pid_weighted(&wpid, &tr->sf_pids, max_pids_count);
 
-    if (wpid.count > max_pids_count) {
-      if (lfe->sf_device->sd_fullmux_ok) {
-        mpegts_pid_done(&wpid);
-        goto all;
-      }
+    if (wpid.count > max_pids_count && sd->sd_fullmux_ok) {
+      mpegts_pid_done(&wpid);
+      goto all;
     }
 
     mpegts_pid_compare(&wpid, &tr->sf_pids_tuned, &padd, &pdel);
@@ -892,7 +972,7 @@ all:
       mpegts_pid_del(&tr->sf_pids_tuned, pdel.pids[i].pid, pdel.pids[i].weight);
     }
 
-    j = MIN(padd.count, lfe->sf_device->sd_pids_max);
+    j = MIN(padd.count, max_pids_count);
     for (i = 0; i < j; i++)
       sprintf(add + strlen(add), ",%i", padd.pids[i].pid);
 
@@ -913,7 +993,7 @@ all:
   }
 
   if (r < 0)
-    tvherror("satip", "%s - failed to modify pids: %s", name, strerror(-r));
+    tvherror(LS_SATIP, "%s - failed to modify pids: %s", name, strerror(-r));
   return r;
 
 skip:
@@ -922,6 +1002,101 @@ skip:
     r = satip_rtsp_play(rtsp, NULL, NULL, NULL, 0, tr->sf_weight);
   }
   return 0;
+}
+
+static int
+satip_frontend_other_is_waiting( satip_frontend_t *lfe )
+{
+  satip_device_t *sd = lfe->sf_device;
+  satip_frontend_t *lfe2;
+  int r, i, cont, hash1, hash2, limit0, limit, group, *hashes, count;
+
+  if (lfe->sf_type != DVB_TYPE_S)
+    return 0;
+
+  pthread_mutex_lock(&lfe->sf_dvr_lock);
+  if (lfe->sf_req) {
+    hash1 = lfe->sf_req->sf_netposhash;
+    limit = (limit0 = lfe->sf_req->sf_netlimit) - 1;
+    group = lfe->sf_req->sf_netgroup;
+  } else {
+    hash1 = limit0 = limit = group = 0;
+  }
+  pthread_mutex_unlock(&lfe->sf_dvr_lock);
+
+  if (hash1 == 0)
+    return 0;
+
+  r = count = 0;
+  pthread_mutex_lock(&sd->sd_tune_mutex);
+  TAILQ_FOREACH(lfe2, &lfe->sf_device->sd_frontends, sf_link) count++;
+  hashes = alloca(sizeof(int) * count);
+  memset(hashes, 0, sizeof(int) * count);
+  TAILQ_FOREACH(lfe2, &lfe->sf_device->sd_frontends, sf_link) {
+    if (lfe2 == lfe) continue;
+    pthread_mutex_lock(&lfe2->sf_dvr_lock);
+    cont = 0;
+    if (limit0 > 0) {
+      cont = group > 0 && lfe2->sf_req_thread && group != lfe2->sf_req_thread->sf_netgroup;
+    } else {
+      cont = (lfe->sf_master && lfe2->sf_number != lfe->sf_master) ||
+             (lfe2->sf_master && lfe->sf_number != lfe2->sf_master);
+    }
+    hash2 = lfe2->sf_req_thread ? lfe2->sf_req_thread->sf_netposhash : 0;
+    pthread_mutex_unlock(&lfe2->sf_dvr_lock);
+    if (cont || hash2 == 0) continue;
+    if (hash2 != hash1) {
+      for (i = 0; i < count; i++) {
+        if (hashes[i] == hash2) break;
+        if (hashes[i] == 0) {
+          hashes[i] = hash2;
+          r++;
+          break;
+        }
+      }
+    }
+  }
+  pthread_mutex_unlock(&sd->sd_tune_mutex);
+  return r > limit;
+}
+
+static void
+satip_frontend_wake_other_waiting
+  ( satip_frontend_t *lfe, satip_tune_req_t *tr )
+{
+  satip_frontend_t *lfe2;
+  int hash1, hash2;
+
+  if (tr == NULL)
+    return;
+
+  hash1 = tr->sf_netposhash;
+
+  TAILQ_FOREACH(lfe2, &lfe->sf_device->sd_frontends, sf_link) {
+    if (lfe2 == lfe)
+      continue;
+    if ((lfe->sf_master && lfe2->sf_number != lfe->sf_master) ||
+        (lfe2->sf_master && lfe->sf_number != lfe2->sf_master))
+      continue;
+    pthread_mutex_lock(&lfe2->sf_dvr_lock);
+    hash2 = lfe2->sf_req ? lfe2->sf_req->sf_netposhash : 0;
+    if (hash2 != 0 && hash1 != hash2 && lfe2->sf_running)
+      tvh_write(lfe2->sf_dvr_pipe.wr, "o", 1);
+    pthread_mutex_unlock(&lfe2->sf_dvr_lock);
+  }
+}
+
+static void
+satip_frontend_request_cleanup
+  ( satip_frontend_t *lfe, satip_tune_req_t *tr )
+{
+  if (tr && tr != lfe->sf_req) {
+    mpegts_pid_done(&tr->sf_pids);
+    mpegts_pid_done(&tr->sf_pids_tuned);
+    free(tr);
+  }
+  if (tr == lfe->sf_req_thread)
+    lfe->sf_req_thread = NULL;
 }
 
 static void
@@ -957,7 +1132,7 @@ satip_frontend_extra_shutdown
   snprintf(b, sizeof(b), "/stream=%li", stream_id);
   r = rtsp_teardown(rtsp, b, NULL);
   if (r < 0) {
-    tvhtrace("satip", "bad shutdown for session %s stream id %li", session, stream_id);
+    tvhtrace(LS_SATIP, "bad shutdown for session %s stream id %li", session, stream_id);
   } else {
     while (1) {
       r = http_client_run(rtsp);
@@ -977,7 +1152,7 @@ satip_frontend_extra_shutdown
   }
 
   http_client_close(rtsp);
-  tvhlog(LOG_INFO, "satip", "extra shutdown done for session %s", session);
+  tvhinfo(LS_SATIP, "extra shutdown done for session %s", session);
 
 done:
   tvhpoll_destroy(efd);
@@ -985,22 +1160,24 @@ done:
 
 static void
 satip_frontend_shutdown
-  ( satip_frontend_t *lfe, http_client_t *rtsp, tvhpoll_t *efd )
+  ( satip_frontend_t *lfe, const char *name, http_client_t *rtsp,
+    satip_tune_req_t *tr, tvhpoll_t *efd )
 {
   char b[32];
   tvhpoll_event_t ev;
   int r, nfds;
 
   if (rtsp->hc_rtsp_stream_id < 0)
-    return;
+    goto wake;
 
   snprintf(b, sizeof(b), "/stream=%li", rtsp->hc_rtsp_stream_id);
+  tvhtrace(LS_SATIP, "%s - shutdown for %s/%s", name, b, rtsp->hc_rtsp_session ?: "");
   r = rtsp_teardown(rtsp, (char *)b, NULL);
   if (r < 0) {
-    tvhtrace("satip", "%s - bad teardown", b);
+    tvhtrace(LS_SATIP, "%s - bad teardown", b);
   } else {
     while (1) {
-      r = http_client_run(rtsp);
+     r = http_client_run(rtsp);
       if (r != HTTP_CON_RECEIVING && r != HTTP_CON_SENDING)
         break;
       nfds = tvhpoll_wait(efd, &ev, 1, 400);
@@ -1016,6 +1193,12 @@ satip_frontend_shutdown
     }
   }
   sbuf_free(&lfe->sf_sbuf);
+
+wake:
+  pthread_mutex_lock(&lfe->sf_dvr_lock);
+  satip_frontend_wake_other_waiting(lfe, tr);
+  satip_frontend_request_cleanup(lfe, tr);
+  pthread_mutex_unlock(&lfe->sf_dvr_lock);
 }
 
 static void
@@ -1038,7 +1221,8 @@ satip_frontend_tuning_error ( satip_frontend_t *lfe, satip_tune_req_t *tr )
 
 static void
 satip_frontend_close_rtsp
-  ( satip_frontend_t *lfe, tvhpoll_t *efd, http_client_t **rtsp )
+  ( satip_frontend_t *lfe, const char *name, tvhpoll_t *efd,
+    http_client_t *rtsp, satip_tune_req_t *tr )
 {
   tvhpoll_event_t ev;
 
@@ -1048,7 +1232,7 @@ satip_frontend_close_rtsp
   ev.data.ptr = NULL;
   tvhpoll_rem(efd, &ev, 1);
 
-  satip_frontend_shutdown(lfe, *rtsp, efd);
+  satip_frontend_shutdown(lfe, name, rtsp, tr, efd);
 
   memset(&ev, 0, sizeof(ev));
   ev.events   = TVHPOLL_IN;
@@ -1056,8 +1240,7 @@ satip_frontend_close_rtsp
   ev.data.ptr = NULL;
   tvhpoll_add(efd, &ev, 1);
 
-  http_client_close(*rtsp);
-  *rtsp = NULL;
+  http_client_close(rtsp);
 }
 
 static int
@@ -1100,7 +1283,7 @@ satip_frontend_rtp_data_received( http_client_t *hc, void *buf, size_t len )
       lfe->sf_seq = nseq;
     else if (((lfe->sf_seq + 1) & 0xffff) != nseq) {
       unc = ((c - pos) / 188) * (uint32_t)((uint16_t)nseq-(uint16_t)(lfe->sf_seq+1));
-      tvhtrace("satip", "TCP/RTP discontinuity (%i != %i)", lfe->sf_seq + 1, nseq);
+      tvhtrace(LS_SATIP, "TCP/RTP discontinuity (%i != %i)", lfe->sf_seq + 1, nseq);
     }
     lfe->sf_seq = nseq;
 
@@ -1120,16 +1303,16 @@ wrdata:
     }
 
     if (lfe->sf_sbuf.sb_ptr > 64 * 1024 ||
-        lfe->sf_last_data_tstamp != dispatch_clock) {
+        lfe->sf_last_data_tstamp + sec2mono(1) <= mclk()) {
       pthread_mutex_lock(&lfe->sf_dvr_lock);
       if (lfe->sf_req == lfe->sf_req_thread) {
         mmi = lfe->sf_req->sf_mmi;
-        mmi->tii_stats.unc += unc;
+        atomic_add(&mmi->tii_stats.unc, unc);
         mpegts_input_recv_packets((mpegts_input_t*)lfe, mmi,
                                   &lfe->sf_sbuf, 0, NULL);
       }
       pthread_mutex_unlock(&lfe->sf_dvr_lock);
-      lfe->sf_last_data_tstamp = dispatch_clock;
+      lfe->sf_last_data_tstamp = mclk();
     }
 
   } else if (b[1] == 1) {
@@ -1202,8 +1385,11 @@ new_tune:
   rtcp = rtp = NULL;
   lfe_master = NULL;
 
-  if (rtsp && !lfe->sf_device->sd_fast_switch)
-    satip_frontend_close_rtsp(lfe, efd, &rtsp);
+  if (rtsp && !lfe->sf_device->sd_fast_switch) {
+    satip_frontend_close_rtsp(lfe, buf, efd, rtsp, tr);
+    rtsp = NULL;
+    tr = NULL;
+  }
 
   if (rtsp)
     rtsp->hc_rtp_data_received = NULL;
@@ -1217,23 +1403,34 @@ new_tune:
   lfe->mi_display_name((mpegts_input_t*)lfe, buf, sizeof(buf));
   lfe->sf_display_name = buf;
 
-  while (!start) {
+  u64_2 = getfastmonoclock();
 
-    nfds = tvhpoll_wait(efd, ev, 1, rtsp ? 50 : -1);
+  if (!satip_frontend_other_is_waiting(lfe)) start |= 2; else start &= ~2;
 
-    if (!tvheadend_running) { exit_flag = 1; goto done; }
-    if (rtsp && nfds == 0) satip_frontend_close_rtsp(lfe, efd, &rtsp);
+  while (start != 3) {
+
+    nfds = tvhpoll_wait(efd, ev, 1, rtsp ? 55 : -1);
+
+    if (!satip_frontend_other_is_waiting(lfe)) start |= 2; else start &= ~2;
+
+    if (!tvheadend_is_running()) { exit_flag = 1; goto done; }
+    if (rtsp && (getfastmonoclock() - u64_2 > 50000 || /* 50ms */
+                 (start & 2) == 0)) {
+      satip_frontend_close_rtsp(lfe, buf, efd, rtsp, tr);
+      rtsp = NULL;
+      tr = NULL;
+    }
     if (nfds <= 0) continue;
 
     if (ev[0].data.ptr == NULL) {
       c = read(lfe->sf_dvr_pipe.rd, b, 1);
       if (c == 1) {
         if (b[0] == 'e') {
-          tvhtrace("satip", "%s - input thread received shutdown", buf);
+          tvhtrace(LS_SATIP, "%s - input thread received shutdown", buf);
           exit_flag = 1;
           goto done;
         } else if (b[0] == 's') {
-          tvhtrace("satip", "%s - start", buf);
+          tvhtrace(LS_SATIP, "%s - start", buf);
           start = 1;
         }
       }
@@ -1265,6 +1462,7 @@ new_tune:
   lfe->mi_display_name((mpegts_input_t*)lfe, buf, sizeof(buf));
 
   pthread_mutex_lock(&lfe->sf_dvr_lock);
+  satip_frontend_request_cleanup(lfe, tr);
   lfe->sf_req_thread = tr = lfe->sf_req;
   pthread_mutex_unlock(&lfe->sf_dvr_lock);
 
@@ -1283,7 +1481,7 @@ new_tune:
 
   if ((rtsp_flags & SATIP_SETUP_TCP) == 0) {
     if (udp_bind_double(&rtp, &rtcp,
-                        "satip", "rtp", "rtcp",
+                        LS_SATIP, "rtp", "rtcp",
                         satip_frontend_bindaddr(lfe), lfe->sf_udp_rtp_port,
                         NULL, SATIP_BUF_SIZE, 16384, 4*1024, 4*1024) < 0) {
       satip_frontend_tuning_error(lfe, tr);
@@ -1292,7 +1490,7 @@ new_tune:
 
     rtp_port = ntohs(IP_PORT(rtp->ip));
 
-    tvhtrace("satip", "%s - local RTP port %i RTCP port %i",
+    tvhtrace(LS_SATIP, "%s - local RTP port %i RTCP port %i",
                       lfe->mi_name,
                       ntohs(IP_PORT(rtp->ip)),
                       ntohs(IP_PORT(rtcp->ip)));
@@ -1331,19 +1529,19 @@ new_tune:
   tc = 1;
   while (i) {
 
-    u64_2 = (getmonoclock() - u64) / 1000;
+    u64_2 = (getfastmonoclock() - u64) / 1000;
     if (u64_2 >= (uint64_t)i)
       break;
     r = (uint64_t)i - u64_2;
       
     if (tc)
-      tvhtrace("satip", "%s - last tune diff = %llu (delay = %d)",
+      tvhtrace(LS_SATIP, "%s - last tune diff = %llu (delay = %d)",
                buf, (unsigned long long)u64_2, r);
 
     tc = 1;
     nfds = tvhpoll_wait(efd, ev, 1, r);
 
-    if (!tvheadend_running) { exit_flag = 1; goto done; }
+    if (!tvheadend_is_running()) { exit_flag = 1; goto done; }
     if (nfds < 0) continue;
     if (nfds == 0) break;
 
@@ -1356,15 +1554,17 @@ new_tune:
           changing = 1;
           continue;
         } else if (b[0] == 'e') {
-          tvhtrace("satip", "%s - input thread received shutdown", buf);
+          tvhtrace(LS_SATIP, "%s - input thread received shutdown", buf);
           exit_flag = 1;
           goto done;
         } else if (b[0] == 's') {
           start = 1;
           goto done;
+        } else if (b[0] == 'o') {
+          continue;
         }
       }
-      tvhtrace("satip", "%s - input thread received mux close", buf);
+      tvhtrace(LS_SATIP, "%s - input thread received mux close", buf);
       goto done;
     }
 
@@ -1380,7 +1580,7 @@ new_tune:
   }
 
   pthread_mutex_lock(&lfe->sf_device->sd_tune_mutex);
-  lfe_master->sf_last_tune = getmonoclock();
+  lfe_master->sf_last_tune = getfastmonoclock();
   pthread_mutex_unlock(&lfe->sf_device->sd_tune_mutex);
 
   i = 0;
@@ -1441,9 +1641,9 @@ new_tune:
   pthread_mutex_unlock(&lfe->sf_dvr_lock);
   if (r < 0) {
     if (r != -12345678)
-      tvherror("satip", "%s - failed to tune (%i)", buf, r);
+      tvherror(LS_SATIP, "%s - failed to tune (%i)", buf, r);
     else
-      tvhtrace("satip", "%s - mux changed in the middle", buf);
+      tvhtrace(LS_SATIP, "%s - mux changed in the middle", buf);
     satip_frontend_tuning_error(lfe, tr);
     goto done;
   }
@@ -1457,7 +1657,7 @@ new_tune:
 
     nfds = tvhpoll_wait(efd, ev, 1, ms);
 
-    if (!tvheadend_running || exit_flag) {
+    if (!tvheadend_is_running() || exit_flag) {
       exit_flag = 1;
       running = 0;
       if (reply++ > 5)
@@ -1472,15 +1672,17 @@ new_tune:
           changing = 1;
           continue;
         } else if (b[0] == 'e') {
-          tvhtrace("satip", "%s - input thread received shutdown", buf);
+          tvhtrace(LS_SATIP, "%s - input thread received shutdown", buf);
           exit_flag = 1; running = 0;
           continue;
         } else if (b[0] == 's') {
           start = 1; running = 0;
           continue;
+        } else if (b[0] == 'o') {
+          continue;
         }
       }
-      tvhtrace("satip", "%s - input thread received mux close", buf);
+      tvhtrace(LS_SATIP, "%s - input thread received mux close", buf);
       running = 0;
       continue;
     }
@@ -1499,7 +1701,7 @@ new_tune:
       r = http_client_run(rtsp);
       if (r < 0) {
         if (rtsp->hc_code == 404 && session[0]) {
-          tvhlog(LOG_WARNING, "satip", "%s - RTSP 404 ERROR (retrying)", buf);
+          tvhwarn(LS_SATIP, "%s - RTSP 404 ERROR (retrying)", buf);
           satip_frontend_extra_shutdown(lfe, session, stream_id);
           session[0] = '\0';
           start = 1;
@@ -1507,8 +1709,8 @@ new_tune:
           rtsp = NULL;
           break;
         }
-        tvhlog(LOG_ERR, "satip", "%s - RTSP error %d (%s) [%i-%i]",
-               buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
+        tvherror(LS_SATIP, "%s - RTSP error %d (%s) [%i-%i]",
+                 buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
         satip_frontend_tuning_error(lfe, tr);
         fatal = 1;
       } else if (r == HTTP_CON_DONE) {
@@ -1521,8 +1723,8 @@ new_tune:
           if (!running)
             break;
           if (r < 0) {
-            tvhlog(LOG_ERR, "satip", "%s - RTSP OPTIONS error %d (%s) [%i-%i]",
-                   buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
+            tvherror(LS_SATIP, "%s - RTSP OPTIONS error %d (%s) [%i-%i]",
+                     buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
             satip_frontend_tuning_error(lfe, tr);
             fatal = 1;
           }
@@ -1536,15 +1738,15 @@ new_tune:
                           rtsp->hc_rtcp_port != rtp_port + 1)) ||
                        ((rtsp_flags & SATIP_SETUP_TCP) != 0 &&
                          (rtsp->hc_rtp_tcp < 0 || rtsp->hc_rtcp_tcp < 0))) {
-            tvhlog(LOG_ERR, "satip", "%s - RTSP SETUP error %d (%s) [%i-%i]",
-                   buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
+            tvherror(LS_SATIP, "%s - RTSP SETUP error %d (%s) [%i-%i]",
+                     buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
             satip_frontend_tuning_error(lfe, tr);
             fatal = 1;
           } else {
             strncpy((char *)session, rtsp->hc_rtsp_session ?: "", sizeof(session));
             session[sizeof(session)-1] = '\0';
             stream_id = rtsp->hc_rtsp_stream_id;
-            tvhdebug("satip", "%s #%i - new session %s stream id %li",
+            tvhdebug(LS_SATIP, "%s #%i - new session %s stream id %li",
                         rtsp->hc_host, lfe->sf_number,
                         rtsp->hc_rtsp_session, rtsp->hc_rtsp_stream_id);
             if (lfe->sf_play2) {
@@ -1559,7 +1761,7 @@ new_tune:
               }
               pthread_mutex_unlock(&lfe->sf_dvr_lock);
               if (r < 0) {
-                tvherror("satip", "%s - failed to tune2 (%i)", buf, r);
+                tvherror(LS_SATIP, "%s - failed to tune2 (%i)", buf, r);
                 satip_frontend_tuning_error(lfe, tr);
                 fatal = 1;
               }
@@ -1576,6 +1778,7 @@ new_tune:
         case RTSP_CMD_PLAY:
           if (!running)
             break;
+          satip_frontend_wake_other_waiting(lfe, tr);
           if (rtsp->hc_code == 200 && play2) {
             play2 = 0;
             if (satip_frontend_pid_changed(rtsp, lfe, buf) > 0) {
@@ -1586,8 +1789,8 @@ new_tune:
           /* fall thru */
         default:
           if (rtsp->hc_code >= 400) {
-            tvhlog(LOG_ERR, "satip", "%s - RTSP cmd error %d (%s) [%i-%i]",
-                   buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
+            tvherror(LS_SATIP, "%s - RTSP cmd error %d (%s) [%i-%i]",
+                     buf, r, strerror(-r), rtsp->hc_cmd, rtsp->hc_code);
             satip_frontend_tuning_error(lfe, tr);
             fatal = 1;
           }
@@ -1601,7 +1804,7 @@ new_tune:
     }
 
     /* We need to keep the session alive */
-    if (rtsp->hc_ping_time + rtsp->hc_rtp_timeout / 2 < dispatch_clock &&
+    if (rtsp->hc_ping_time + sec2mono(rtsp->hc_rtp_timeout / 2) < mclk() &&
         rtsp->hc_cmd == HTTP_CMD_NONE) {
       rtsp_options(rtsp);
       reply = 1;
@@ -1627,11 +1830,11 @@ new_tune:
       if (ERRNO_AGAIN(errno))
         continue;
       if (errno == EOVERFLOW) {
-        tvhlog(LOG_WARNING, "satip", "%s - recvmsg() EOVERFLOW", buf);
+        tvhwarn(LS_SATIP, "%s - recvmsg() EOVERFLOW", buf);
         continue;
       }
-      tvhlog(LOG_ERR, "satip", "%s - multirecv error %d (%s)",
-             buf, errno, strerror(errno));
+      tvherror(LS_SATIP, "%s - multirecv error %d (%s)",
+               buf, errno, strerror(errno));
       break;
     }
 
@@ -1661,7 +1864,7 @@ new_tune:
         seq = nseq;
       else if (((seq + 1) & 0xffff) != nseq) {
         unc += ((c - pos) / 188) * (uint32_t)((uint16_t)nseq-(uint16_t)(seq+1));
-        tvhtrace("satip", "RTP discontinuity (%i != %i)", seq + 1, nseq);
+        tvhtrace(LS_SATIP, "RTP discontinuity (%i != %i)", seq + 1, nseq);
       }
       seq = nseq;
       /* Process */
@@ -1681,7 +1884,7 @@ wrdata:
     }
     pthread_mutex_lock(&lfe->sf_dvr_lock);
     if (lfe->sf_req == lfe->sf_req_thread) {
-      mmi->tii_stats.unc += unc;
+      atomic_add(&mmi->tii_stats.unc, unc);
       mpegts_input_recv_packets((mpegts_input_t*)lfe, mmi, sb, 0, NULL);
     } else
       fatal = 1;
@@ -1710,33 +1913,29 @@ wrdata:
   tvhpoll_rem(efd, ev, nfds);
 
   if (exit_flag) {
-    satip_frontend_shutdown(lfe, rtsp, efd);
+    satip_frontend_shutdown(lfe, buf, rtsp, tr, efd);
+    tr = NULL;
     http_client_close(rtsp);
     rtsp = NULL;
   }
 
 done:
-  pthread_mutex_lock(&lfe->sf_dvr_lock);
-  if (tr && tr != lfe->sf_req) {
-    mpegts_pid_done(&tr->sf_pids);
-    mpegts_pid_done(&tr->sf_pids_tuned);
-    free(tr);
-  }
-  lfe->sf_req_thread = tr = NULL;
-  pthread_mutex_unlock(&lfe->sf_dvr_lock);
-
   udp_close(rtcp);
   udp_close(rtp);
   rtcp = rtp = NULL;
 
   if (lfe->sf_teardown_delay && lfe_master) {
     pthread_mutex_lock(&lfe->sf_device->sd_tune_mutex);
-    lfe->sf_last_tune = lfe_master->sf_last_tune = getmonoclock();
+    lfe->sf_last_tune = lfe_master->sf_last_tune = getfastmonoclock();
     pthread_mutex_unlock(&lfe->sf_device->sd_tune_mutex);
   }
 
   if (!exit_flag)
     goto new_tune;
+
+  pthread_mutex_lock(&lfe->sf_dvr_lock);
+  satip_frontend_request_cleanup(lfe, tr);
+  pthread_mutex_unlock(&lfe->sf_dvr_lock);
 
   if (rtsp)
     http_client_close(rtsp);
@@ -1744,6 +1943,7 @@ done:
   tvhpoll_destroy(efd);
   lfe->sf_display_name = NULL;
   lfe->sf_curmux = NULL;
+
   return NULL;
 #undef PKTS
 }
@@ -1793,14 +1993,14 @@ satip_frontend_wizard_set( tvh_input_t *ti, htsmsg_t *conf, const char *lang )
   satip_frontend_t *lfe = (satip_frontend_t*)ti;
   const char *ntype = htsmsg_get_str(conf, "mpegts_network_type");
   mpegts_network_t *mn;
+  htsmsg_t *nlist;
 
+  mpegts_network_wizard_create(ntype, &nlist, lang);
   mn = satip_frontend_wizard_network(lfe);
-  if (ntype && lfe->sf_master == 0 && (mn == NULL || mn->mn_wizard)) {
+  if (nlist && lfe->sf_master == 0 && (mn == NULL || mn->mn_wizard)) {
     htsmsg_t *conf = htsmsg_create_map();
     htsmsg_t *list = htsmsg_create_list();
     htsmsg_t *pos  = htsmsg_create_map();
-    htsmsg_t *nlist;
-    mpegts_network_wizard_create(ntype, &nlist, lang);
     htsmsg_add_bool(pos, "enabled", 1);
     htsmsg_add_msg(pos, "networks", nlist);
     htsmsg_add_msg(list, NULL, pos);
@@ -1809,7 +2009,9 @@ satip_frontend_wizard_set( tvh_input_t *ti, htsmsg_t *conf, const char *lang )
     htsmsg_destroy(conf);
     if (satip_frontend_wizard_network(lfe))
       mpegts_input_set_enabled((mpegts_input_t *)lfe, 1);
-    satip_device_save(lfe->sf_device);
+    satip_device_changed(lfe->sf_device);
+  } else {
+    htsmsg_destroy(nlist);
   }
 }
 
@@ -1882,7 +2084,7 @@ satip_frontend_create
   else if (type == DVB_TYPE_ATSC_C)
     idc = &satip_frontend_atsc_c_class;
   else {
-    tvherror("satip", "unknown FE type %d", type);
+    tvherror(LS_SATIP, "unknown FE type %d", type);
     return NULL;
   }
 
@@ -1905,6 +2107,8 @@ satip_frontend_create
 
   /* Defaults */
   lfe->sf_position     = -1;
+  lfe->sf_netlimit     = 1;
+  lfe->sf_netgroup     = 0;
 
   /* Callbacks */
   lfe->mi_get_weight   = satip_frontend_get_weight;
@@ -1927,6 +2131,7 @@ satip_frontend_create
   lfe->ti_wizard_get     = satip_frontend_wizard_get;
   lfe->ti_wizard_set     = satip_frontend_wizard_set;
   lfe->mi_is_enabled     = satip_frontend_is_enabled;
+  lfe->mi_warm_mux       = satip_frontend_warm_mux;
   lfe->mi_start_mux      = satip_frontend_start_mux;
   lfe->mi_stop_mux       = satip_frontend_stop_mux;
   lfe->mi_network_list   = satip_frontend_network_list;
@@ -2006,14 +2211,14 @@ satip_frontend_delete ( satip_frontend_t *lfe )
   /* Stop thread */
   if (lfe->sf_dvr_pipe.wr > 0) {
     tvh_write(lfe->sf_dvr_pipe.wr, "e", 1);
-    tvhtrace("satip", "%s - waiting for control thread", buf1);
+    tvhtrace(LS_SATIP, "%s - waiting for control thread", buf1);
     pthread_join(lfe->sf_dvr_thread, NULL);
     tvh_pipe_close(&lfe->sf_dvr_pipe);
-    tvhdebug("satip", "%s - stopped control thread", buf1);
+    tvhdebug(LS_SATIP, "%s - stopped control thread", buf1);
   }
 
   /* Stop timer */
-  gtimer_disarm(&lfe->sf_monitor_timer);
+  mtimer_disarm(&lfe->sf_monitor_timer);
 
   /* Remove from adapter */
   TAILQ_REMOVE(&lfe->sf_device->sd_frontends, lfe, sf_link);

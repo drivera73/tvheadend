@@ -60,23 +60,23 @@ static cron_multi_t  *epggrab_cron_multi;
  */
 static void _epggrab_module_grab ( epggrab_module_int_t *mod )
 {
-  time_t tm1, tm2;
+  int64_t tm1, tm2;
   htsmsg_t *data;
 
   if (!mod->enabled)
     return;
 
   /* Grab */
-  time(&tm1);
+  tm1 = getfastmonoclock();
   data = mod->trans(mod, mod->grab(mod));
-  time(&tm2);
+  tm2 = getfastmonoclock() + (MONOCLOCK_RESOLUTION / 2);
 
   /* Process */
   if ( data ) {
-    tvhlog(LOG_INFO, mod->id, "grab took %"PRItime_t" seconds", tm2 - tm1);
+    tvhinfo(mod->subsys, "%s: grab took %"PRId64" seconds", mod->id, mono2sec(tm2 - tm1));
     epggrab_module_parse(mod, data);
   } else {
-    tvhlog(LOG_WARNING, mod->id, "grab returned no data");
+    tvhwarn(mod->subsys, "%s: grab returned no data", mod->id);
   }
 }
 
@@ -95,10 +95,10 @@ static void* _epggrab_internal_thread ( void* p )
   ts.tv_sec  = time(NULL) + 120;
 
   /* Time for other jobs */
-  while (epggrab_running) {
+  while (atomic_get(&epggrab_running)) {
     pthread_mutex_lock(&epggrab_mutex);
     err = ETIMEDOUT;
-    while (epggrab_running) {
+    while (atomic_get(&epggrab_running)) {
       err = pthread_cond_timedwait(&epggrab_cond, &epggrab_mutex, &ts);
       if (err == ETIMEDOUT) break;
     }
@@ -108,11 +108,11 @@ static void* _epggrab_internal_thread ( void* p )
 
   time(&ts.tv_sec);
 
-  while (epggrab_running) {
+  while (atomic_get(&epggrab_running)) {
 
     /* Check for config change */
     pthread_mutex_lock(&epggrab_mutex);
-    while (epggrab_running && confver == epggrab_confver) {
+    while (atomic_get(&epggrab_running) && confver == epggrab_confver) {
       err = pthread_cond_timedwait(&epggrab_cond, &epggrab_mutex, &ts);
       if (err == ETIMEDOUT) break;
     }
@@ -126,7 +126,7 @@ static void* _epggrab_internal_thread ( void* p )
     /* Run grabber(s) */
     /* Note: this loop is not protected, assuming static boot allocation */
     LIST_FOREACH(mod, &epggrab_modules, link) {
-      if (!epggrab_running)
+      if (!atomic_get(&epggrab_running))
         break;
       if (mod->type == EPGGRAB_INT)
          _epggrab_module_grab((epggrab_module_int_t *)mod);
@@ -134,6 +134,13 @@ static void* _epggrab_internal_thread ( void* p )
   }
 
   return NULL;
+}
+
+void
+epggrab_rerun_internal(void)
+{
+  epggrab_confver++;
+  pthread_cond_signal(&epggrab_cond);
 }
 
 /* **************************************************************************
@@ -165,16 +172,18 @@ static void _epggrab_load ( void )
   } else {
     free(epggrab_conf.cron);
     epggrab_conf.cron = strdup("# Default config (00:04 and 12:04 everyday)\n4 */12 * * *");
-    LIST_FOREACH(mod, &epggrab_modules, link) // enable all OTA by default
-      if (mod->type == EPGGRAB_OTA) {
+    LIST_FOREACH(mod, &epggrab_modules, link) // enable only OTA EIT and OTA PSIP by default
+      if (mod->type == EPGGRAB_OTA &&
+          ((mod->subsys == LS_TBL_EIT && strcmp(mod->id, "eit") == 0) ||
+           mod->subsys == LS_PSIP)) {
         mod->enabled = 1;
         epggrab_activate_module(mod, 1);
       }
   }
 
   if (epggrab_conf.epgdb_periodicsave)
-    gtimer_arm(&epggrab_save_timer, epg_save_callback, NULL,
-               epggrab_conf.epgdb_periodicsave * 3600);
+    gtimer_arm_rel(&epggrab_save_timer, epg_save_callback, NULL,
+                   epggrab_conf.epgdb_periodicsave * 3600);
 
   idnode_notify_changed(&epggrab_conf.idnode);
  
@@ -185,14 +194,22 @@ static void _epggrab_load ( void )
   xmltv_load();
 }
 
-void epggrab_save ( void )
+/* **************************************************************************
+ * Class
+ * *************************************************************************/
+
+static void
+epggrab_class_changed(idnode_t *self)
+{
+  /* Register */
+  epggrab_rerun_internal();
+}
+
+static htsmsg_t *
+epggrab_class_save(idnode_t *self, char *filename, size_t fsize)
 {
   epggrab_module_t *mod;
   htsmsg_t *m, *a;
-
-  /* Register */
-  epggrab_confver++;
-  pthread_cond_signal(&epggrab_cond);
 
   /* Save */
   m = htsmsg_create_map();
@@ -205,17 +222,8 @@ void epggrab_save ( void )
     htsmsg_add_msg(a, mod->id, m);
   }
   htsmsg_add_msg(m, "modules", a);
-  hts_settings_save(m, "epggrab/config");
-  htsmsg_destroy(m);
-}
-
-/* **************************************************************************
- * Class
- * *************************************************************************/
-
-static void epggrab_class_save(idnode_t *self)
-{
-  epggrab_save();
+  snprintf(filename, fsize, "epggrab/config");
+  return m;
 }
 
 epggrab_conf_t epggrab_conf = {
@@ -237,12 +245,17 @@ epggrab_class_ota_cron_notify(void *self, const char *lang)
   epggrab_ota_set_cron();
 }
 
+CLASS_DOC(epgconf)
+PROP_DOC(cron)
+
 const idclass_t epggrab_class = {
   .ic_snode      = &epggrab_conf.idnode,
   .ic_class      = "epggrab",
-  .ic_caption    = N_("EPG grabber configuration"),
+  .ic_caption    = N_("EPG Grabber Configuration"),
+  .ic_doc        = tvh_doc_epgconf_class,
   .ic_event      = "epggrab",
   .ic_perm_def   = ACCESS_ADMIN,
+  .ic_changed    = epggrab_class_changed,
   .ic_save       = epggrab_class_save,
   .ic_groups     = (const property_group_t[]) {
       {
@@ -269,6 +282,7 @@ const idclass_t epggrab_class = {
                    "Note: this may cause unwanted changes to "
                    "already defined channel names."),
       .off    = offsetof(epggrab_conf_t, channel_rename),
+      .opts   = PO_ADVANCED,
       .group  = 1,
     },
     {
@@ -280,6 +294,7 @@ const idclass_t epggrab_class = {
                    "Note: this may cause unwanted changes to "
                    "already defined channel numbers."),
       .off    = offsetof(epggrab_conf_t, channel_renumber),
+      .opts   = PO_ADVANCED,
       .group  = 1,
     },
     {
@@ -291,6 +306,7 @@ const idclass_t epggrab_class = {
                    "Note: this may cause unwanted changes to "
                    "already defined channel icons."),
       .off    = offsetof(epggrab_conf_t, channel_reicon),
+      .opts   = PO_ADVANCED,
       .group  = 1,
     },
     {
@@ -313,6 +329,7 @@ const idclass_t epggrab_class = {
                    "The default cron triggers the internal grabbers "
                    "daily at 12:04 and 00:04. See Help on how to define "
                    "your own."),
+      .doc    = prop_doc_cron,
       .off    = offsetof(epggrab_conf_t, cron),
       .notify = epggrab_class_cron_notify,
       .opts   = PO_MULTILINE | PO_ADVANCED,
@@ -335,6 +352,7 @@ const idclass_t epggrab_class = {
                    "The default cron triggers the Over-the-air "
                    "grabber daily at 02:04 and 14:04. See Help on how "
                    "to define your own."),
+      .doc    = prop_doc_cron,
       .off    = offsetof(epggrab_conf_t, ota_cron),
       .notify = epggrab_class_ota_cron_notify,
       .opts   = PO_MULTILINE | PO_ADVANCED,
@@ -348,7 +366,7 @@ const idclass_t epggrab_class = {
                    "time at most. If the EPG data is complete before "
                    "this limit, the mux is released sooner."),
       .off    = offsetof(epggrab_conf_t, ota_timeout),
-      .opts   = PO_ADVANCED,
+      .opts   = PO_EXPERT,
       .group  = 3,
     },
     {}
@@ -398,6 +416,16 @@ void epggrab_init ( void )
   pthread_mutex_init(&epggrab_mutex, NULL);
   pthread_cond_init(&epggrab_cond, NULL);
 
+  idclass_register(&epggrab_class);
+  idclass_register(&epggrab_mod_class);
+  idclass_register(&epggrab_mod_int_class);
+  idclass_register(&epggrab_mod_int_pyepg_class);
+  idclass_register(&epggrab_mod_int_xmltv_class);
+  idclass_register(&epggrab_mod_ext_class);
+  idclass_register(&epggrab_mod_ext_pyepg_class);
+  idclass_register(&epggrab_mod_ext_xmltv_class);
+  idclass_register(&epggrab_mod_ota_class);
+
   epggrab_channel_init();
 
   /* Initialise modules */
@@ -419,7 +447,7 @@ void epggrab_init ( void )
   epggrab_ota_post();
 
   /* Start internal grab thread */
-  epggrab_running = 1;
+  atomic_set(&epggrab_running, 1);
   tvhthread_create(&epggrab_tid, NULL, _epggrab_internal_thread, NULL, "epggrabi");
 }
 
@@ -430,12 +458,13 @@ void epggrab_done ( void )
 {
   epggrab_module_t *mod;
 
-  epggrab_running = 0;
+  atomic_set(&epggrab_running, 0);
   pthread_cond_signal(&epggrab_cond);
   pthread_join(epggrab_tid, NULL);
 
   pthread_mutex_lock(&global_lock);
   while ((mod = LIST_FIRST(&epggrab_modules)) != NULL) {
+    idnode_save_check(&mod->idnode, 1);
     idnode_unlink(&mod->idnode);
     LIST_REMOVE(mod, link);
     pthread_mutex_unlock(&global_lock);

@@ -170,7 +170,7 @@ const idclass_t iptv_mux_class =
     },
     {
       .type     = PT_S64,
-      .intsplit = CHANNEL_SPLIT,
+      .intextra = CHANNEL_SPLIT,
       .id       = "channel_number",
       .name     = N_("Channel number"),
       .off      = offsetof(iptv_mux_t, mm_iptv_chnum),
@@ -250,9 +250,10 @@ const idclass_t iptv_mux_class =
       .type     = PT_U32,
       .id       = "iptv_buffer_limit",
       .name     = N_("Buffering limit (ms)"),
-      .desc     = N_("Specifies the incoming buffering limit in milliseconds (PCR based). "
-                     "If PCR time difference from the system clock is higher, the incoming "
-                     "stream is paused."),
+      .desc     = N_("Specifies the incoming buffering limit in "
+                     "milliseconds (PCR based). If the PCR time "
+                     "difference from the system clock is higher than "
+                     "this, the incoming stream is paused."),
       .off      = offsetof(iptv_mux_t, mm_iptv_buffer_limit),
       .opts     = PO_ADVANCED,
     },
@@ -260,44 +261,49 @@ const idclass_t iptv_mux_class =
   }
 };
 
-static void
-iptv_mux_config_save ( mpegts_mux_t *mm )
+static htsmsg_t *
+iptv_mux_config_save ( mpegts_mux_t *mm, char *filename, size_t fsize )
 {
   char ubuf1[UUID_HEX_SIZE];
   char ubuf2[UUID_HEX_SIZE];
   htsmsg_t *c = htsmsg_create_map();
   mpegts_mux_save(mm, c);
-  hts_settings_save(c, "input/iptv/networks/%s/muxes/%s/config",
-                    idnode_uuid_as_str(&mm->mm_network->mn_id, ubuf1),
-                    idnode_uuid_as_str(&mm->mm_id, ubuf2));
-  htsmsg_destroy(c);
+  snprintf(filename, fsize, "input/iptv/networks/%s/muxes/%s",
+           idnode_uuid_as_str(&mm->mm_network->mn_id, ubuf1),
+           idnode_uuid_as_str(&mm->mm_id, ubuf2));
+  return c;
+}
+
+static void
+iptv_mux_free ( mpegts_mux_t *mm )
+{
+  iptv_mux_t *im = (iptv_mux_t *)mm;
+  free(im->mm_iptv_url);
+  free(im->mm_iptv_url_sane);
+  free(im->mm_iptv_url_raw);
+  free(im->mm_iptv_muxname);
+  free(im->mm_iptv_interface);
+  free(im->mm_iptv_svcname);
+  free(im->mm_iptv_env);
+  free(im->mm_iptv_hdr);
+  free(im->mm_iptv_tags);
+  free(im->mm_iptv_icon);
+  free(im->mm_iptv_epgid);
+  mpegts_mux_free(mm);
 }
 
 static void
 iptv_mux_delete ( mpegts_mux_t *mm, int delconf )
 {
-  iptv_mux_t *im = (iptv_mux_t*)mm, copy;
   char ubuf1[UUID_HEX_SIZE];
   char ubuf2[UUID_HEX_SIZE];
 
   if (delconf)
-    hts_settings_remove("input/iptv/networks/%s/muxes/%s/config",
+    hts_settings_remove("input/iptv/networks/%s/muxes/%s",
                         idnode_uuid_as_str(&mm->mm_network->mn_id, ubuf1),
                         idnode_uuid_as_str(&mm->mm_id, ubuf2));
 
-  copy = *im; /* keep pointers */
   mpegts_mux_delete(mm, delconf);
-  free(copy.mm_iptv_url);
-  free(copy.mm_iptv_url_sane);
-  free(copy.mm_iptv_url_raw);
-  free(copy.mm_iptv_muxname);
-  free(copy.mm_iptv_interface);
-  free(copy.mm_iptv_svcname);
-  free(copy.mm_iptv_env);
-  free(copy.mm_iptv_hdr);
-  free(copy.mm_iptv_tags);
-  free(copy.mm_iptv_icon);
-  free(copy.mm_iptv_epgid);
 }
 
 static void
@@ -320,7 +326,7 @@ iptv_mux_display_name ( mpegts_mux_t *mm, char *buf, size_t len )
 iptv_mux_t *
 iptv_mux_create0 ( iptv_network_t *in, const char *uuid, htsmsg_t *conf )
 {
-  htsmsg_t *c, *e;
+  htsmsg_t *c, *c2, *e;
   htsmsg_field_t *f;
   iptv_service_t *ms;
   char ubuf1[UUID_HEX_SIZE];
@@ -335,6 +341,7 @@ iptv_mux_create0 ( iptv_network_t *in, const char *uuid, htsmsg_t *conf )
   im->mm_display_name     = iptv_mux_display_name;
   im->mm_config_save      = iptv_mux_config_save;
   im->mm_delete           = iptv_mux_delete;
+  im->mm_free             = iptv_mux_free;
 
   if (!im->mm_iptv_kill_timeout)
     im->mm_iptv_kill_timeout = 5;
@@ -347,9 +354,12 @@ iptv_mux_create0 ( iptv_network_t *in, const char *uuid, htsmsg_t *conf )
                                    (mpegts_mux_t*)im);
 
   /* Services */
-  c = hts_settings_load_r(1, "input/iptv/networks/%s/muxes/%s/services",
-                          idnode_uuid_as_str(&in->mn_id, ubuf1),
-                          idnode_uuid_as_str(&im->mm_id, ubuf2));
+  c2 = NULL;
+  c = htsmsg_get_map(conf, "services");
+  if (c == NULL)
+    c = c2 = hts_settings_load_r(1, "input/iptv/networks/%s/muxes/%s/services",
+                                 idnode_uuid_as_str(&in->mn_id, ubuf1),
+                                 idnode_uuid_as_str(&im->mm_id, ubuf2));
   if (c) {
     HTSMSG_FOREACH(f, c) {
       if (!(e = htsmsg_field_get_map(f))) continue;
@@ -364,7 +374,7 @@ iptv_mux_create0 ( iptv_network_t *in, const char *uuid, htsmsg_t *conf )
     if (ms)
       iptv_bouquet_trigger(in, 0);
   }
-  htsmsg_destroy(c);
+  htsmsg_destroy(c2);
 
   return im;
 }

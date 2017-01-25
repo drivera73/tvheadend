@@ -11,9 +11,15 @@
 
 CONFIGURE_ARGS="$*"
 
+# Compiler
+[ -z "$CC"       ] && CC=cc
+[ -z "$CFLAGS"   ] && CFLAGS=
+[ -z "$LDFLAGS"  ] && LDFLAGS=
+
 # System setup
 [ -z "$PLATFORM" ] && PLATFORM=$(uname -s | tr "[:upper:]" "[:lower:]")
 [ -z "$CPU"      ] && CPU=generic
+[ -z "$ARCH"     ] && ARCH=$($CC -dumpmachine | cut -d '-' -f 1)
 [ -z "$ARCH"     ] && ARCH=$(uname -m)
 [ -z "$OSENV"    ] && OSENV=posix
 [ -z "$PYTHON"   ] && PYTHON=python
@@ -28,11 +34,6 @@ CONFIGURE_ARGS="$*"
 [ -z "$libdir"   ] && libdir=\${prefix}/lib
 [ -z "$datadir"  ] && datadir=\${prefix}/share
 [ -z "$mandir"   ] && mandir=\${datadir}/man
-
-# Compiler
-[ -z "$CC"       ] && CC=cc
-[ -z "$CFLAGS"   ] && CFLAGS=
-[ -z "$LDFLAGS"  ] && LDFLAGS=
 
 # Environment
 [ -z "$ROOTDIR"  ] && ROOTDIR=$(cd "$(dirname "$0")"; pwd)
@@ -173,6 +174,7 @@ show_help ()
   printf "  $fmt Build and optimize for specific CPU\n" "--cpu=CPU"
   printf "  $fmt Build for architecture [$ARCH]\n" "--arch=ARCH"
   printf "  $fmt Build for platform [$PLATFORM]\n" "--platform=PLATFORM"
+  printf "  $fmt Build without -Werror CFLAGS\n" "--nowerror"
   printf "  $fmt Use python binary [$PYTHON]\n" "--python=PYTHON"
   echo ""
   echo "Options"
@@ -494,6 +496,11 @@ mandir    = ${mandir}
 datadir   = ${datadir}
 libdir    = ${libdir}
 EOF
+
+  # no -Werror
+  if test -n "${NOWERROR}"; then
+    echo "CFLAGS_NO_WERROR = yes" >> "${CONFIG_MK}"
+  fi
 
   # Create C include
   CONFIG_H="${BUILDDIR}/build.h"

@@ -20,8 +20,6 @@
 #include "streaming.h"
 #include "tsfix.h"
 
-#define tsfixprintf(fmt...) // printf(fmt)
-
 LIST_HEAD(tfstream_list, tfstream);
 
 /**
@@ -64,7 +62,7 @@ typedef struct tsfix {
   int tf_hasvideo;
   int tf_wait_for_video;
   int64_t tf_tsref;
-  time_t tf_start_time;
+  int64_t tf_start_time;
 
   struct th_pktref_queue tf_ptsq;
   struct th_pktref_queue tf_backlog;
@@ -191,9 +189,19 @@ tsfix_stop(tsfix_t *tf)
  *
  */
 static void
+tsfix_packet_drop(tfstream_t *tfs, th_pkt_t *pkt, const char *reason)
+{
+  pkt_trace(LS_TSFIX, pkt, tfs->tfs_index, tfs->tfs_type, "drop");
+  pkt_ref_dec(pkt);
+}
+
+/**
+ *
+ */
+static void
 normalize_ts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt, int backlog)
 {
-  int64_t ref, dts, d;
+  int64_t ref, dts, odts, opts, d;
 
   if(tf->tf_tsref == PTS_UNSET) {
     if (backlog) {
@@ -205,22 +213,32 @@ normalize_ts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt, int backlog)
     return;
   }
 
+  ref = tfs->tfs_local_ref != PTS_UNSET ? tfs->tfs_local_ref : tf->tf_tsref;
+  odts = pkt->pkt_dts;
+  opts = pkt->pkt_pts;
+
+  if (pkt->pkt_dts == PTS_UNSET) {
+    if (pkt->pkt_pts != PTS_UNSET)
+      pkt->pkt_dts = pkt->pkt_pts;
+    else
+      goto deliver;
+  }
+
   pkt->pkt_dts &= PTS_MASK;
-  pkt->pkt_pts &= PTS_MASK;
 
   /* Subtract the transport wide start offset */
-  ref = tfs->tfs_local_ref != PTS_UNSET ? tfs->tfs_local_ref : tf->tf_tsref;
   dts = pkt->pkt_dts - ref;
 
-  if(tfs->tfs_last_dts_norm == PTS_UNSET) {
-    if(dts < 0) {
+  if (tfs->tfs_last_dts_norm == PTS_UNSET) {
+    if (dts < 0 || pkt->pkt_err) {
       /* Early packet with negative time stamp, drop those */
-      pkt_ref_dec(pkt);
+      tsfix_packet_drop(tfs, pkt, "negative/error");
       return;
     }
   } else {
-    int64_t low   =  90000; /* one second */
-    int64_t upper = 180000; /* two seconds */
+    const int64_t nlimit =      -1; /* allow negative values - rounding errors? */
+    int64_t low          =   90000; /* one second */
+    int64_t upper        = 2*90000; /* two seconds */
     d = dts + tfs->tfs_dts_epoch - tfs->tfs_last_dts_norm;
 
     if (tfs->tfs_subtitle) {
@@ -232,18 +250,19 @@ normalize_ts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt, int backlog)
       upper = low - 1;
     }
 
-    if (d < 0 || d > low) {
-
-      if(d < -PTS_MASK || d > -PTS_MASK + upper) {
-
+    if (d < nlimit || d > low) {
+      if (d < -PTS_MASK || d > -PTS_MASK + upper) {
+        if (pkt->pkt_err) {
+          tsfix_packet_drop(tfs, pkt, "possible wrong discontinuity");
+          return;
+        }
 	tfs->tfs_bad_dts++;
-
-	if(tfs->tfs_bad_dts < 5) {
-	  tvhlog(LOG_ERR, "parser",
-		 "transport stream %s, DTS discontinuity. "
-		 "DTS = %" PRId64 ", last = %" PRId64,
-		 streaming_component_type2txt(tfs->tfs_type),
-		 dts, tfs->tfs_last_dts_norm);
+        if (tfs->tfs_bad_dts < 5) {
+	  tvherror(LS_TSFIX,
+		   "transport stream %s, DTS discontinuity. "
+		   "DTS = %" PRId64 ", last = %" PRId64,
+		   streaming_component_type2txt(tfs->tfs_type),
+		   dts, tfs->tfs_last_dts_norm);
 	}
       } else {
 	/* DTS wrapped, increase upper bits */
@@ -260,19 +279,20 @@ normalize_ts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt, int backlog)
 
   if(pkt->pkt_pts != PTS_UNSET) {
     /* Compute delta between PTS and DTS (and watch out for 33 bit wrap) */
-    d = (pkt->pkt_pts - pkt->pkt_dts) & PTS_MASK;
+    d = ((pkt->pkt_pts & PTS_MASK) - pkt->pkt_dts) & PTS_MASK;
     pkt->pkt_pts = dts + d;
   }
 
   pkt->pkt_dts = dts;
 
-  tsfixprintf("TSFIX: %-12s %d %10"PRId64" %10"PRId64" %10d %zd\n",
-	      streaming_component_type2txt(tfs->tfs_type),
-	      pkt->pkt_frametype,
-	      pkt->pkt_dts,
-	      pkt->pkt_pts,
-	      pkt->pkt_duration,
-	      pktbuf_len(pkt->pkt_payload));
+deliver:
+  if (tvhtrace_enabled()) {
+    char _odts[22], _opts[22];
+    pkt_trace(LS_TSFIX, pkt, tfs->tfs_index, tfs->tfs_type,
+              "deliver odts %s opts %s ref %"PRId64" epoch %"PRId64,
+              pts_to_string(odts, _odts), pts_to_string(opts, _opts),
+              ref, tfs->tfs_dts_epoch);
+  }
 
   streaming_message_t *sm = streaming_msg_create_pkt(pkt);
   streaming_target_deliver2(tf->tf_output, sm);
@@ -287,13 +307,9 @@ static void
 tsfix_backlog(tsfix_t *tf)
 {
   th_pkt_t *pkt;
-  th_pktref_t *pr;
   tfstream_t *tfs;
 
-  while((pr = TAILQ_FIRST(&tf->tf_backlog)) != NULL) {
-    pkt = pr->pr_pkt;
-    TAILQ_REMOVE(&tf->tf_backlog, pr, pr_link);
-    free(pr);
+  while((pkt = pktref_get_first(&tf->tf_backlog)) != NULL) {
     tfs = tfs_find(tf, pkt);
     normalize_ts(tf, tfs, pkt, 0);
   }
@@ -311,7 +327,7 @@ tsfix_backlog_diff(tsfix_t *tf)
   tfstream_t *tfs;
   int64_t res = 0;
 
-  TAILQ_FOREACH(pr, &tf->tf_backlog, pr_link) {
+  PKTREF_FOREACH(pr, &tf->tf_backlog) {
     pkt = pr->pr_pkt;
     if (pkt->pkt_dts == PTS_UNSET) continue;
     if (pkt->pkt_dts >= tf->tf_tsref) continue;
@@ -327,19 +343,33 @@ tsfix_backlog_diff(tsfix_t *tf)
 
 /**
  *
+ * Recover unset PTS.
+ *
+ * MPEG2 DTS/PTS example (rpts = result pts):
+ * 01: I dts 4922701936 pts 4922712736 rpts 4922712736
+ * 02: B dts 4922705536 pts <unset>    rpts 4922705536
+ * 03: B dts 4922709136 pts <unset>    rpts 4922709136
+ * 04: P dts 4922712736 pts <unset>    rpts 4922723536
+ * 05: B dts 4922716336 pts <unset>    rpts 4922716336
+ * 06: B dts 4922719936 pts <unset>    rpts 4922719936
+ * 07: P dts 4922723536 pts <unset>    rpts 4922734336
+ * 08: B dts 4922727136 pts <unset>    rpts 4922727136
+ * 09: B dts 4922730736 pts <unset>    rpts 4922730736
+ * 10: P dts 4922734336 pts <unset>    rpts 4922745136
+ * 11: B dts 4922737936 pts <unset>    rpts 4922737936
+ * 12: B dts 4922741536 pts <unset>    rpts 4922741536
+ * 13: I dts 4922745136 pts 4922755936 rpts 4922755936
  */
 static void
 recover_pts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt)
 {
-  th_pktref_t *pr, *srch;
+  th_pktref_t *srch;
+  int total;
 
   pktref_enqueue(&tf->tf_ptsq, pkt);
 
-  while((pr = TAILQ_FIRST(&tf->tf_ptsq)) != NULL) {
+  while((pkt = pktref_get_first(&tf->tf_ptsq)) != NULL) {
     
-    pkt = pr->pr_pkt;
-    TAILQ_REMOVE(&tf->tf_ptsq, pr, pr_link);
-
     tfs = tfs_find(tf, pkt);
 
     switch(tfs->tfs_type) {
@@ -348,30 +378,44 @@ recover_pts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt)
 
       switch(pkt->pkt_frametype) {
       case PKT_B_FRAME:
-	/* B-frames have same PTS as DTS, pass them on */
-	pkt->pkt_pts = pkt->pkt_dts;
-	tsfixprintf("TSFIX: %-12s PTS b-frame set to %"PRId64"\n",
-		    streaming_component_type2txt(tfs->tfs_type),
-		    pkt->pkt_dts);
+        if (pkt->pkt_pts == PTS_UNSET) {
+	  /* B-frames have same PTS as DTS, pass them on */
+	  tvhtrace(LS_TSFIX, "%-12s PTS b-frame set to %"PRId64" (old %"PRId64")",
+		   streaming_component_type2txt(tfs->tfs_type),
+		   pkt->pkt_dts, pkt->pkt_pts);
+	  pkt->pkt_pts = pkt->pkt_dts;
+        }
 	break;
       
       case PKT_I_FRAME:
       case PKT_P_FRAME:
-	/* Presentation occures at DTS of next I or P frame,
-	   try to find it */
-	TAILQ_FOREACH(srch, &tf->tf_ptsq, pr_link)
-	  if (tfs_find(tf, srch->pr_pkt) == tfs &&
-	      srch->pr_pkt->pkt_frametype <= PKT_P_FRAME) {
-	    pkt->pkt_pts = srch->pr_pkt->pkt_dts;
-	    tsfixprintf("TSFIX: %-12s PTS *-frame set to %"PRId64"\n",
-			streaming_component_type2txt(tfs->tfs_type),
-			pkt->pkt_pts);
-	    break;
-	  }
-	if (srch == NULL) {
-	  /* return packet back to tf_ptsq */
-	  TAILQ_INSERT_HEAD(&tf->tf_ptsq, pr, pr_link);
-	  return; /* not arrived yet, wait */
+        if (pkt->pkt_pts == PTS_UNSET) {
+	  /* Presentation occures at DTS of next I or P frame,
+	     try to find it */
+          total = 0;
+          PKTREF_FOREACH(srch, &tf->tf_ptsq) {
+            if (pkt->pkt_componentindex != tfs->tfs_index)
+              continue;
+            total++;
+            if (srch->pr_pkt->pkt_frametype <= PKT_P_FRAME &&
+                pts_is_greater_or_equal(pkt->pkt_dts, srch->pr_pkt->pkt_dts) > 0 &&
+                pts_diff(pkt->pkt_dts, srch->pr_pkt->pkt_dts) < 10 * 90000) {
+              tvhtrace(LS_TSFIX, "%-12s PTS *-frame set to %"PRId64" (old %"PRId64"), DTS %"PRId64,
+                          streaming_component_type2txt(tfs->tfs_type),
+                          srch->pr_pkt->pkt_dts, pkt->pkt_pts, pkt->pkt_dts);
+              pkt->pkt_pts = srch->pr_pkt->pkt_dts;
+              break;
+            }	  
+          }
+          if (srch == NULL) {
+            if (total < 50) {
+              /* return packet back to tf_ptsq */
+              pktref_insert_head(&tf->tf_ptsq, pkt);
+            } else {
+              tsfix_packet_drop(tfs, pkt, "mpeg2video overflow");
+            }
+            return; /* not arrived yet or invalid, wait */
+          }
         }
       }
       break;
@@ -380,7 +424,6 @@ recover_pts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt)
       break;
     }
 
-    free(pr);
     normalize_ts(tf, tfs, pkt, 1);
   }
 }
@@ -395,7 +438,7 @@ compute_pts(tsfix_t *tf, tfstream_t *tfs, th_pkt_t *pkt)
   // If PTS is missing, set it to DTS if not video
   if(pkt->pkt_pts == PTS_UNSET && !tfs->tfs_video) {
     pkt->pkt_pts = pkt->pkt_dts;
-    tsfixprintf("TSFIX: %-12s PTS set to %"PRId64"\n",
+    tvhtrace(LS_TSFIX, "%-12s PTS set to %"PRId64,
 		streaming_component_type2txt(tfs->tfs_type),
 		pkt->pkt_pts);
   }
@@ -419,7 +462,7 @@ tsfix_input_packet(tsfix_t *tf, streaming_message_t *sm)
   streaming_msg_free(sm);
   int64_t diff, diff2, threshold;
   
-  if(tfs == NULL || dispatch_clock < tf->tf_start_time) {
+  if(tfs == NULL || mclk() < tf->tf_start_time) {
     pkt_ref_dec(pkt);
     return;
   }
@@ -427,6 +470,10 @@ tsfix_input_packet(tsfix_t *tf, streaming_message_t *sm)
   if(pkt->pkt_dts != PTS_UNSET && tf->tf_tsref == PTS_UNSET &&
      ((!tf->tf_hasvideo && tfs->tfs_audio) ||
       (tfs->tfs_video && pkt->pkt_frametype == PKT_I_FRAME))) {
+    if (pkt->pkt_err) {
+      tsfix_packet_drop(tfs, pkt, "ref1");
+      return;
+    }
     threshold = 22500;
     LIST_FOREACH(tfs2, &tf->tf_streams, tfs_link)
       if (tfs != tfs2 && (tfs2->tfs_audio || tfs2->tfs_video) && !tfs2->tfs_seen) {
@@ -439,15 +486,19 @@ tsfix_input_packet(tsfix_t *tf, streaming_message_t *sm)
       if (diff > 160000)
         diff = 160000;
       tf->tf_tsref = (tf->tf_tsref - diff) % PTS_MASK;
-      tvhtrace("parser", "reference clock set to %"PRId64" (backlog %"PRId64")", tf->tf_tsref, diff2);
+      tvhtrace(LS_TSFIX, "reference clock set to %"PRId64" (backlog %"PRId64")", tf->tf_tsref, diff2);
       tsfix_backlog(tf);
     }
   } else if (tfs->tfs_local_ref == PTS_UNSET && tf->tf_tsref != PTS_UNSET &&
              pkt->pkt_dts != PTS_UNSET) {
+    if (pkt->pkt_err) {
+      tsfix_packet_drop(tfs, pkt, "ref2");
+      return;
+    }
     if (tfs->tfs_audio) {
       diff = tsfix_ts_diff(tf->tf_tsref, pkt->pkt_dts);
       if (diff > 2 * 90000) {
-        tvhwarn("parser", "The timediff for %s is big (%"PRId64"), using current dts",
+        tvhwarn(LS_TSFIX, "The timediff for %s is big (%"PRId64"), using current dts",
                 streaming_component_type2txt(tfs->tfs_type), diff);
         tfs->tfs_local_ref = pkt->pkt_dts;
       } else {
@@ -459,7 +510,7 @@ tsfix_input_packet(tsfix_t *tf, streaming_message_t *sm)
         if(tfs2->tfs_audio && tfs2->tfs_last_dts_in != PTS_UNSET) {
           diff = tsfix_ts_diff(tfs2->tfs_last_dts_in, pkt->pkt_dts);
           if (diff > 3 * 90000) {
-            tvhwarn("parser", "The timediff for DVBSUB is big (%"PRId64"), using audio dts", diff);
+            tvhwarn(LS_TSFIX, "The timediff for DVBSUB is big (%"PRId64"), using audio dts", diff);
             tfs->tfs_parent = tfs2;
             tfs->tfs_local_ref = tfs2->tfs_local_ref;
           } else {
@@ -475,7 +526,7 @@ tsfix_input_packet(tsfix_t *tf, streaming_message_t *sm)
       diff = tsfix_ts_diff(tf->tf_tsref, pkt->pkt_dts);
       if (diff > 2 * 90000) {
         tfstream_t *tfs2;
-        tvhwarn("parser", "The timediff for TELETEXT is big (%"PRId64"), using current dts", diff);
+        tvhwarn(LS_TSFIX, "The timediff for TELETEXT is big (%"PRId64"), using current dts", diff);
         tfs->tfs_local_ref = pkt->pkt_dts;
         /* Text subtitles extracted from teletext have same timebase */
         LIST_FOREACH(tfs2, &tf->tf_streams, tfs_link)
@@ -499,11 +550,12 @@ tsfix_input_packet(tsfix_t *tf, streaming_message_t *sm)
       return;
     }
 
-    pkt->pkt_dts = (tfs->tfs_last_dts_in + pdur) & PTS_MASK;
-
-    tsfixprintf("TSFIX: %-12s DTS set to last %"PRId64" +%d == %"PRId64"\n",
+    if(pkt->pkt_payload != NULL || pkt->pkt_pts != PTS_UNSET) {
+      pkt->pkt_dts = (tfs->tfs_last_dts_in + pdur) & PTS_MASK;
+      tvhtrace(LS_TSFIX, "%-12s DTS set to last %"PRId64" +%d == %"PRId64", PTS = %"PRId64,
 		streaming_component_type2txt(tfs->tfs_type),
-		tfs->tfs_last_dts_in, pdur, pkt->pkt_dts);
+		tfs->tfs_last_dts_in, pdur, pkt->pkt_dts, pkt->pkt_pts);
+    }
   }
 
   if (tfs->tfs_parent)
@@ -533,6 +585,7 @@ tsfix_input(void *opaque, streaming_message_t *sm)
     return;
 
   case SMT_START:
+    tsfix_stop(tf);
     tsfix_start(tf, sm->sm_data);
     if (tf->tf_wait_for_video) {
       streaming_msg_free(sm);
@@ -561,6 +614,20 @@ tsfix_input(void *opaque, streaming_message_t *sm)
   streaming_target_deliver2(tf->tf_output, sm);
 }
 
+static htsmsg_t *
+tsfix_input_info(void *opaque, htsmsg_t *list)
+{
+  tsfix_t *tf = opaque;
+  streaming_target_t *st = tf->tf_output;
+  htsmsg_add_str(list, NULL, "tsfix input");
+  return st->st_ops.st_info(st->st_opaque, list);
+}
+
+static streaming_ops_t tsfix_input_ops = {
+  .st_cb   = tsfix_input,
+  .st_info = tsfix_input_info
+};
+
 
 /**
  *
@@ -573,22 +640,11 @@ tsfix_create(streaming_target_t *output)
   TAILQ_INIT(&tf->tf_ptsq);
 
   tf->tf_output = output;
-  tf->tf_start_time = dispatch_clock;
+  tf->tf_start_time = mclk();
 
-  streaming_target_init(&tf->tf_input, tsfix_input, tf, 0);
+  streaming_target_init(&tf->tf_input, &tsfix_input_ops, tf, 0);
   return &tf->tf_input;
 }
-
-/**
- *
- */
-void tsfix_set_start_time(streaming_target_t *pad, time_t start)
-{
-  tsfix_t *tf = (tsfix_t *)pad;
-
-  tf->tf_start_time = start;
-}
-
 
 /**
  *

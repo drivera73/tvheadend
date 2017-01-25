@@ -165,23 +165,31 @@ gh_queue_delay(globalheaders_t *gh, int index)
    * Find only packets which require the meta data. Ignore others.
    */
   while (f != l) {
-    ssc = streaming_start_component_find_by_index
-            (gh->gh_ss, f->pr_pkt->pkt_componentindex);
-    if (ssc && ssc->ssc_index == index)
-      break;
+    if (f->pr_pkt->pkt_dts != PTS_UNSET) {
+      ssc = streaming_start_component_find_by_index
+              (gh->gh_ss, f->pr_pkt->pkt_componentindex);
+      if (ssc && ssc->ssc_index == index)
+        break;
+    }
     f = TAILQ_NEXT(f, pr_link);
   }
   while (l != f) {
-    ssc = streaming_start_component_find_by_index
-            (gh->gh_ss, l->pr_pkt->pkt_componentindex);
-    if (ssc && ssc->ssc_index == index)
-      break;
+    if (l->pr_pkt->pkt_dts != PTS_UNSET) {
+      ssc = streaming_start_component_find_by_index
+              (gh->gh_ss, l->pr_pkt->pkt_componentindex);
+      if (ssc && ssc->ssc_index == index)
+        break;
+    }
     l = TAILQ_PREV(l, th_pktref_queue, pr_link);
   }
 
-  diff = (l->pr_pkt->pkt_dts & PTS_MASK) - (f->pr_pkt->pkt_dts & PTS_MASK);
-  if (diff < 0)
-    diff += PTS_MASK;
+  if (l->pr_pkt->pkt_dts != PTS_UNSET && f->pr_pkt->pkt_dts != PTS_UNSET) {
+    diff = (l->pr_pkt->pkt_dts & PTS_MASK) - (f->pr_pkt->pkt_dts & PTS_MASK);
+    if (diff < 0)
+      diff += PTS_MASK;
+  } else {
+    diff = 0;
+  }
 
   /* special noop packet from transcoder, increase decision limit */
   if (l == f && l->pr_pkt->pkt_payload == NULL)
@@ -229,7 +237,7 @@ headers_complete(globalheaders_t *gh)
        */
       if(threshold || (qd[i] <= 0 && qd_max > (MAX_SCAN_TIME * 90) / 2)) {
 	ssc->ssc_disabled = 1;
-        tvhdebug("parser", "gh disable stream %d %s%s%s (PID %i) threshold %d qd %"PRId64" qd_max %"PRId64,
+        tvhdebug(LS_GLOBALHEADERS, "gh disable stream %d %s%s%s (PID %i) threshold %d qd %"PRId64" qd_max %"PRId64,
              ssc->ssc_index, streaming_component_type2txt(ssc->ssc_type),
              ssc->ssc_lang[0] ? " " : "", ssc->ssc_lang, ssc->ssc_pid,
              threshold, qd[i], qd_max);
@@ -244,7 +252,7 @@ headers_complete(globalheaders_t *gh)
   if (tvhtrace_enabled()) {
     for(i = 0; i < ss->ss_num_components; i++) {
       ssc = &ss->ss_components[i];
-      tvhtrace("parser", "stream %d %s%s%s (PID %i) complete time %"PRId64"%s",
+      tvhtrace(LS_GLOBALHEADERS, "stream %d %s%s%s (PID %i) complete time %"PRId64"%s",
                ssc->ssc_index, streaming_component_type2txt(ssc->ssc_type),
                ssc->ssc_lang[0] ? " " : "", ssc->ssc_lang, ssc->ssc_pid,
                gh_queue_delay(gh, ssc->ssc_index),
@@ -274,7 +282,6 @@ static void
 gh_hold(globalheaders_t *gh, streaming_message_t *sm)
 {
   th_pkt_t *pkt;
-  th_pktref_t *pr;
   streaming_start_component_t *ssc;
 
   switch(sm->sm_type) {
@@ -282,11 +289,18 @@ gh_hold(globalheaders_t *gh, streaming_message_t *sm)
     pkt = sm->sm_data;
     ssc = streaming_start_component_find_by_index(gh->gh_ss, 
 						  pkt->pkt_componentindex);
-    assert(ssc != NULL);
+    if (ssc == NULL) {
+      tvherror(LS_GLOBALHEADERS, "Unable to find component %d", pkt->pkt_componentindex);
+      streaming_msg_free(sm);
+      return;
+    }
+
+    pkt_trace(LS_GLOBALHEADERS, pkt, pkt->pkt_componentindex, ssc->ssc_type, "hold receive");
 
     pkt_ref_inc(pkt);
 
-    apply_header(ssc, pkt);
+    if (pkt->pkt_err == 0)
+      apply_header(ssc, pkt);
 
     pktref_enqueue(&gh->gh_holdq, pkt);
 
@@ -304,21 +318,19 @@ gh_hold(globalheaders_t *gh, streaming_message_t *sm)
     streaming_target_deliver2(gh->gh_output, sm);
    
     // Send all pending packets
-    while((pr = TAILQ_FIRST(&gh->gh_holdq)) != NULL) {
-      TAILQ_REMOVE(&gh->gh_holdq, pr, pr_link);
-      pkt = pr->pr_pkt;
+    while((pkt = pktref_get_first(&gh->gh_holdq)) != NULL) {
       if (pkt->pkt_payload) {
         sm = streaming_msg_create_pkt(pkt);
         streaming_target_deliver2(gh->gh_output, sm);
       }
       pkt_ref_dec(pkt);
-      free(pr);
     }
     gh->gh_passthru = 1;
     break;
 
   case SMT_START:
-    assert(gh->gh_ss == NULL);
+    if (gh->gh_ss)
+      gh_flush(gh);
     gh_start(gh, sm);
     break;
 
@@ -402,6 +414,20 @@ globalheaders_input(void *opaque, streaming_message_t *sm)
     gh_hold(gh, sm);
 }
 
+static htsmsg_t *
+globalheaders_input_info(void *opaque, htsmsg_t *list)
+{
+  globalheaders_t *gh = opaque;
+  streaming_target_t *st = gh->gh_output;
+  htsmsg_add_str(list, NULL, "globalheaders input");
+  return st->st_ops.st_info(st->st_opaque, list);
+}
+
+static streaming_ops_t globalheaders_input_ops = {
+  .st_cb   = globalheaders_input,
+  .st_info = globalheaders_input_info
+};
+
 
 /**
  *
@@ -414,7 +440,7 @@ globalheaders_create(streaming_target_t *output)
   TAILQ_INIT(&gh->gh_holdq);
 
   gh->gh_output = output;
-  streaming_target_init(&gh->gh_input, globalheaders_input, gh, 0);
+  streaming_target_init(&gh->gh_input, &globalheaders_input_ops, gh, 0);
   return &gh->gh_input;
 }
 

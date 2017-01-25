@@ -24,7 +24,7 @@ tvheadend.caclient = function(panel, index) {
 
     var list = 'enabled,name,username,password,hostname,mode,camdfilename,' +
                'port,deskey,emm,emmex,caid,providerid,tsid,sid,' +
-               'key_even,key_odd,comment';
+               'key_even,key_odd,keepalive_interval,comment';
 
     tvheadend.idnode_form_grid(panel, {
         clazz: 'caclient',
@@ -37,7 +37,8 @@ tvheadend.caclient = function(panel, index) {
         val: 'title',
         fields: ['uuid', 'title', 'status'],
         tabIndex: index,
-        uilevel: 'expert',
+        uilevel: tvheadend.capabilities.indexOf('caclient_advanced') === -1
+                 ? 'expert' : 'advanced',
         list: { url: 'api/caclient/list', params: { } },
         edit: { params: { list: list } },
         add: {
@@ -57,10 +58,7 @@ tvheadend.caclient = function(panel, index) {
         move: true,
         hidepwd: true,
         lcol: [actions],
-        plugins: [actions],
-        help: function() {
-            new tvheadend.help(_('Conditional Access Client'), 'config_caclient.html');
-        }
+        plugins: [actions]
     });
 
     return panel;

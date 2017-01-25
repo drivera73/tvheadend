@@ -110,6 +110,7 @@ typedef enum http_cmd {
   RTSP_CMD_TEARDOWN,
   RTSP_CMD_PLAY,
   RTSP_CMD_PAUSE,
+  RTSP_CMD_GET_PARAMETER,
 } http_cmd_t;
 
 #define HTTP_CMD_OPTIONS RTSP_CMD_OPTIONS
@@ -128,6 +129,7 @@ typedef struct http_connection {
   struct sockaddr_storage *hc_self;
   char *hc_representative;
 
+  pthread_mutex_t  *hc_paths_mutex;
   http_path_list_t *hc_paths;
   int (*hc_process)(struct http_connection *hc, htsbuf_queue_t *spill);
 
@@ -147,6 +149,8 @@ typedef struct http_connection {
 
   char *hc_username;
   char *hc_password;
+  char *hc_authhdr;
+  char *hc_nonce;
   access_t *hc_access;
 
   struct config_head *hc_user_config;
@@ -198,6 +202,8 @@ void http_output_content(http_connection_t *hc, const char *content);
 
 void http_redirect(http_connection_t *hc, const char *location,
                    struct http_arg_list *req_args, int external);
+
+void http_css_import(http_connection_t *hc, const char *location);
 
 void http_send_header(http_connection_t *hc, int rc, const char *content, 
 		      int64_t contentlen, const char *encoding,
@@ -268,6 +274,8 @@ struct http_client {
 
   TAILQ_ENTRY(http_client) hc_link;
 
+  pthread_mutex_t hc_mutex;
+
   int          hc_id;
   int          hc_fd;
   char        *hc_scheme;
@@ -293,7 +301,7 @@ struct http_client {
   char        *hc_data;         /* data body */
   size_t       hc_data_size;    /* data body size - result for caller */
 
-  time_t       hc_ping_time;    /* last issued command */
+  int64_t      hc_ping_time;    /* last issued command */
 
   char        *hc_rbuf;         /* read buffer */
   size_t       hc_rsize;        /* read buffer size */
@@ -306,6 +314,9 @@ struct http_client {
   size_t       hc_chunk_alloc;
   size_t       hc_chunk_pos;
   char        *hc_location;
+  uint8_t      hc_running;	/* outside hc_mutex */
+  uint8_t      hc_shutdown_wait;/* outside hc_mutex */
+  int          hc_refcnt;       /* callback protection - outside hc_mutex */
   int          hc_redirects;
   int          hc_result;
   int          hc_shutdown:1;
@@ -317,8 +328,6 @@ struct http_client {
   int          hc_in_rtp_data:1;
   int          hc_chunked:1;
   int          hc_chunk_trails:1;
-  int          hc_running:1;
-  int          hc_shutdown_wait:1;
   int          hc_handle_location:1; /* handle the redirection (location) requests */
   int          hc_pause:1;
 
@@ -341,10 +350,11 @@ struct http_client {
   int          hc_rtp_timeout;
   char        *hc_rtsp_user;
   char        *hc_rtsp_pass;
+  char         hc_rtsp_keep_alive_cmd;
 
   struct http_client_ssl *hc_ssl; /* ssl internals */
 
-  gtimer_t     hc_close_timer;
+  mtimer_t     hc_close_timer;
 
   /* callbacks */
   void    (*hc_hdr_create)   (http_client_t *hc, http_arg_list_t *h,
@@ -386,8 +396,14 @@ void http_client_unpause( http_client_t *hc );
  * RTSP helpers
  */
 
-int rtsp_send( http_client_t *hc, http_cmd_t cmd, const char *path,
-               const char *query, http_arg_list_t *hdr );
+int rtsp_send_ext( http_client_t *hc, http_cmd_t cmd, const char *path,
+               const char *query, http_arg_list_t *hdr, const char *body, size_t size );
+
+static inline int
+rtsp_send( http_client_t *hc, http_cmd_t cmd, const char *path,
+               const char *query, http_arg_list_t *hdr ) {
+  return rtsp_send_ext( hc, cmd, path, query, hdr, NULL, 0 );
+}
                       
 void rtsp_clear_session( http_client_t *hc );
 
@@ -406,9 +422,16 @@ rtsp_play( http_client_t *hc, const char *path, const char *query ) {
 }
 
 static inline int
+rtsp_pause( http_client_t *hc, const char *path, const char *query ) {
+  return rtsp_send(hc, RTSP_CMD_PAUSE, path, query, NULL);
+}
+
+static inline int
 rtsp_teardown( http_client_t *hc, const char *path, const char *query ) {
   return rtsp_send(hc, RTSP_CMD_TEARDOWN, path, query, NULL);
 }
+
+int rtsp_get_parameter( http_client_t *hc, const char *parameter );
 
 int rtsp_describe_decode( http_client_t *hc );
 static inline int

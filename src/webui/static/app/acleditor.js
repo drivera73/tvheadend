@@ -4,21 +4,18 @@
 
 tvheadend.acleditor = function(panel, index)
 {
-    var list = 'enabled,username,password,prefix,' +
+    var list = 'enabled,username,password,prefix,change,' +
                'lang,webui,uilevel,uilevel_nochange,admin,' +
-               'streaming,adv_streaming,htsp_streaming,' +
-               'profile,conn_limit_type,conn_limit,' +
-               'dvr,htsp_dvr,all_dvr,all_rw_dvr,' +
-	       'dvr_config,channel_min,channel_max,' +
+               'streaming,profile,conn_limit_type,conn_limit,' +
+               'dvr,dvr_config,channel_min,channel_max,' +
 	       'channel_tag_exclude,channel_tag,comment';
 
-    var list2 = 'enabled,username,password,prefix,' +
-                'lang,webui,langui,uilevel,uilevel_nochange,admin,' +
-                'streaming,adv_streaming,htsp_streaming,' +
-                'profile,conn_limit_type,conn_limit,' +
-                'dvr,htsp_dvr,all_dvr,all_rw_dvr,' +
-                'failed_dvr,dvr_config,channel_min,channel_max,' +
-                'channel_tag_exclude,channel_tag,comment';
+    var list2 = 'enabled,username,password,prefix,change,' +
+                'lang,webui,themeui,langui,uilevel,uilevel_nochange,admin,' +
+                'streaming,profile,conn_limit_type,conn_limit,' +
+                'dvr,htsp_anonymize,dvr_config,' +
+                'channel_min,channel_max,channel_tag_exclude,' +
+                'channel_tag,comment';
 
     tvheadend.idnode_grid(panel, {
         id: 'access_entry',
@@ -31,13 +28,9 @@ tvheadend.acleditor = function(panel, index)
             username:       { width: 250 },
             password:       { width: 250 },
             prefix:         { width: 350 },
-            streaming:      { width: 110 },
-            adv_streaming:  { width: 200 },
-            htsp_streaming: { width: 200 },
-            dvr:            { width: 150 },
-            htsp_dvr:       { width: 150 },
-            all_dvr:        { width: 150 },
-            all_rw_dvr:     { width: 150 },
+            change:         { width: 350 },
+            streaming:      { width: 350 },
+            dvr:            { width: 350 },
             webui:          { width: 140 },
             admin:          { width: 100 },
             conn_limit_type:{ width: 160 },
@@ -60,10 +53,7 @@ tvheadend.acleditor = function(panel, index)
         },
         del: true,
         move: true,
-        list: list,
-        help: function() {
-            new tvheadend.help(_('Access Control Entries'), 'config_access.html');
-        }
+        list: list
     });
 };
 
@@ -99,10 +89,7 @@ tvheadend.passwdeditor = function(panel, index)
             create: { }
         },
         del: true,
-        list: list,
-        help: function() {
-            new tvheadend.help(_('Password Control Entries'), 'config_passwords.html');
-        }
+        list: list
     });
 };
 
@@ -125,6 +112,7 @@ tvheadend.ipblockeditor = function(panel, index)
             comment: { width: 250 }
         },
         tabIndex: index,
+        uilevel: 'expert',
         edit: {
             params: {
                 list: list
@@ -138,9 +126,6 @@ tvheadend.ipblockeditor = function(panel, index)
             create: { }
         },
         del: true,
-        list: list,
-        help: function() {
-            new tvheadend.help(_('IP Blocking Entries'), 'config_ipblock.html');
-        }
+        list: list
     });
 };

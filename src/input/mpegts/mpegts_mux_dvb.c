@@ -68,9 +68,7 @@ dvb_mux_##c##_class_##l##_enum (void *o, const char *lang)\
   int i;\
   htsmsg_t *m = htsmsg_create_list(), *e;\
   for (i = 0; i < ARRAY_SIZE(t); i++) {\
-    e = htsmsg_create_map(); \
-    htsmsg_add_str(e, "key", dvb_##t##2str(t[i]));\
-    htsmsg_add_str(e, "val", tvh_gettext_lang(lang, dvb_##t##2str(t[i])));\
+    e = htsmsg_create_key_val(dvb_##t##2str(t[i]), tvh_gettext_lang(lang, dvb_##t##2str(t[i]))); \
     htsmsg_add_msg(m, NULL, e);\
   }\
   return m;\
@@ -98,9 +96,7 @@ dvb_mux_##c##_class_##l##_enum (void *o, const char *lang)\
   int i;\
   htsmsg_t *m = htsmsg_create_list(), *e;\
   for (i = 0; i < ARRAY_SIZE(t); i++) {\
-    e = htsmsg_create_map(); \
-    htsmsg_add_str(e, "key", dvb_##t##2str(t[i]));\
-    htsmsg_add_str(e, "val", tvh_gettext_lang(lang, dvb_##t##2str(t[i])));\
+    e = htsmsg_create_key_val(dvb_##t##2str(t[i]), tvh_gettext_lang(lang, dvb_##t##2str(t[i]))); \
     htsmsg_add_msg(m, NULL, e);\
   }\
   return m;\
@@ -217,8 +213,8 @@ const idclass_t dvb_mux_dvbt_class =
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), dvbt, delsys, "DVBT"),
       .desc     = N_("The delivery system the mux uses. "
-                     "If you have a DVB-T tuner you must select DVB-T "
-                     "here."),
+                     "Make sure that your tuner supports the delivery "
+                     "system selected here."),
     },
     {
       .type     = PT_U32,
@@ -254,7 +250,7 @@ const idclass_t dvb_mux_dvbt_class =
     },
     {
       MUX_PROP_STR("hierarchy", N_("Hierarchy"), dvbt, hier, N_("AUTO")),
-      .desc     = N_("The hierarchical modulation used by this mux. "
+      .desc     = N_("The hierarchical modulation used by the mux. "
                      "Most people will not need to change this setting."),
     },
     {
@@ -312,7 +308,7 @@ const idclass_t dvb_mux_dvbc_class =
   .ic_properties = (const property_t[]){
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), dvbc, delsys, "DVB-C"),
-      .desc     = N_("Select the delivery system used by your cable provider."),
+      .desc     = N_("The delivery system used by your cable provider."),
     },
     {
       .type     = PT_U32,
@@ -443,12 +439,13 @@ const idclass_t dvb_mux_dvbs_class =
   .ic_properties = (const property_t[]){
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), dvbs, delsys, "DVBS"),
+      .desc     = N_("The delivery system used by your provider."),
     },
     {
       .type     = PT_U32,
       .id       = "frequency",
       .name     = N_("Frequency (kHz)"),
-      .desc     = N_("The frequency of the mux/transponder in Hertz,"),
+      .desc     = N_("The frequency of the mux/transponder in Hertz."),
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_freq),
       .set      = dvb_mux_dvbs_class_frequency_set,
     },
@@ -476,40 +473,43 @@ const idclass_t dvb_mux_dvbs_class =
     {
       MUX_PROP_STR("rolloff", N_("Rolloff"), dvbs, rolloff, "AUTO"),
       .desc     = N_("The rolloff used on the mux."),
+      .opts     = PO_ADVANCED,
     },
     {
       MUX_PROP_STR("pilot", N_("Pilot"), dvbs, pilot, "AUTO"),
       .desc     = N_("Enable/disable pilot tone."),
+      .opts     = PO_ADVANCED,
     },
     {
       .type     = PT_INT,
       .id       = "stream_id",
       .name     = N_("ISI (Stream ID)"),
-      .desc     = N_("The stream ID used for this mux."),
+      .desc     = N_("The stream ID used for the mux."),
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_stream_id),
       .def.i	= DVB_NO_STREAM_ID_FILTER,
-      .opts     = PO_ADVANCED
+      .opts     = PO_EXPERT
     },
     {
       MUX_PROP_STR("pls_mode", N_("PLS mode"), dvbs, pls_mode, "ROOT"),
       .desc     = N_("The Physical Layer Scrambling (PLS) mode "
-                     "used on this mux."),
+                     "used on the mux."),
+      .opts     = PO_EXPERT,
     },
     {
       .type     = PT_U32,
       .id       = "pls_code",
       .name     = N_("PLS code"),
       .desc     = N_("The Physical Layer Scrambling (PLS) code "
-                     "used on this mux."),
+                     "used on the mux."),
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_pls_code),
       .def.u32	= 1,
-      .opts     = PO_ADVANCED
+      .opts     = PO_EXPERT
     },
     {
       .type     = PT_STR,
       .id       = "orbital",
       .name     = N_("Orbital position"),
-      .desc     = N_("The orbital position of the satellite this mux is on."),
+      .desc     = N_("The orbital position of the satellite the mux is on."),
       .set      = dvb_mux_dvbs_class_orbital_set,
       .get      = dvb_mux_dvbs_class_orbital_get,
       .opts     = PO_ADVANCED | PO_RDONLY
@@ -545,6 +545,7 @@ const idclass_t dvb_mux_atsc_t_class =
   .ic_properties = (const property_t[]){
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), atsc_t, delsys, "ATSC-T"),
+      .desc     = N_("The delivery system used by your provider."),
     },
     {
       .type     = PT_U32,
@@ -585,6 +586,7 @@ const idclass_t dvb_mux_atsc_c_class =
   .ic_properties = (const property_t[]){
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), atsc_c, delsys, "ATSC-C"),
+      .desc     = N_("The delivery system used by your provider."),
     },
     {
       .type     = PT_U32,
@@ -669,7 +671,7 @@ const idclass_t dvb_mux_isdb_t_class =
   .ic_properties = (const property_t[]){
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), isdb_t, delsys, "ISDB-T"),
-      .desc     = N_("Select the delivery system used by your provider."),
+      .desc     = N_("The delivery system used by your provider."),
     },
     {
       .type     = PT_U32,
@@ -795,12 +797,12 @@ const idclass_t dvb_mux_isdb_c_class =
     },
     {
       MUX_PROP_STR("constellation", N_("Constellation"), dvbc, qam, N_("AUTO")),
-      .desc     = N_("Select the quadrature amplitude modulation (QAM) used by the mux. "
+      .desc     = N_("The quadrature amplitude modulation (QAM) used by the mux. "
                      "If you're not sure of the value leave as AUTO."),
     },
     {
       MUX_PROP_STR("fec", N_("FEC"), dvbc, fec, N_("AUTO")),
-      .desc     = N_("Select the forward error correction used on the mux."),
+      .desc     = N_("The forward error correction used on the mux."),
     },
     {}
   }
@@ -829,6 +831,7 @@ const idclass_t dvb_mux_isdb_s_class =
   .ic_properties = (const property_t[]){
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), isdb_s, delsys, "ISDBS"),
+      .desc     = N_("The delivery system used by your provider."),
     },
     {
       .type     = PT_U32,
@@ -842,7 +845,7 @@ const idclass_t dvb_mux_isdb_s_class =
       .type     = PT_INT,
       .id       = "stream_id",
       .name     = N_("Stream ID"),
-      .desc     = N_("The stream ID used for this mux."),
+      .desc     = N_("The stream ID used for the mux."),
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_stream_id),
       .def.i	= DVB_NO_STREAM_ID_FILTER,
       .opts     = PO_ADVANCED
@@ -874,7 +877,7 @@ const idclass_t dvb_mux_dab_class =
   .ic_properties = (const property_t[]){
     {
       MUX_PROP_STR("delsys", N_("Delivery system"), dab, delsys, "DAB"),
-      .desc     = N_("The delivery system used by your cable provider."),
+      .desc     = N_("The delivery system used by the mux."),
     },
     {
       .type     = PT_U32,
@@ -892,17 +895,17 @@ const idclass_t dvb_mux_dab_class =
  * Class methods
  * *************************************************************************/
 
-static void
-dvb_mux_config_save ( mpegts_mux_t *mm )
+static htsmsg_t *
+dvb_mux_config_save ( mpegts_mux_t *mm, char *filename, size_t fsize )
 {
   char ubuf1[UUID_HEX_SIZE];
   char ubuf2[UUID_HEX_SIZE];
   htsmsg_t *c = htsmsg_create_map();
   mpegts_mux_save(mm, c);
-  hts_settings_save(c, "input/dvb/networks/%s/muxes/%s/config",
-                    idnode_uuid_as_str(&mm->mm_network->mn_id, ubuf1),
-                    idnode_uuid_as_str(&mm->mm_id, ubuf2));
-  htsmsg_destroy(c);
+  snprintf(filename, fsize, "input/dvb/networks/%s/muxes/%s",
+           idnode_uuid_as_str(&mm->mm_network->mn_id, ubuf1),
+           idnode_uuid_as_str(&mm->mm_id, ubuf2));
+  return c;
 }
 
 static void
@@ -940,7 +943,7 @@ dvb_mux_create_instances ( mpegts_mux_t *mm )
   mpegts_network_link_t *mnl;
   LIST_FOREACH(mnl, &mm->mm_network->mn_inputs, mnl_mn_link) {
     mpegts_input_t *mi = mnl->mnl_input;
-    if (mi->mi_is_enabled(mi, mm, 0))
+    if (mi->mi_is_enabled(mi, mm, 0, -1) != MI_IS_ENABLED_NEVER)
       mi->mi_create_mux_instance(mi, mm);
   }
 }
@@ -974,7 +977,7 @@ dvb_mux_create0
   const idclass_t *idc;
   mpegts_mux_t *mm;
   dvb_mux_t *lm;
-  htsmsg_t *c, *e;
+  htsmsg_t *c, *c2, *e;
   htsmsg_field_t *f;
   dvb_fe_delivery_system_t delsys;
   char ubuf1[UUID_HEX_SIZE];
@@ -1009,7 +1012,7 @@ dvb_mux_create0
     idc = &dvb_mux_dab_class;
     delsys = DVB_SYS_DAB;
   } else {
-    tvherror("dvb", "unknown FE type %d", ln->ln_type);
+    tvherror(LS_DVB, "unknown FE type %d", ln->ln_type);
     return NULL;
   }
 
@@ -1042,15 +1045,19 @@ dvb_mux_create0
   if (!conf) return lm;
 
   /* Services */
-  c = hts_settings_load_r(1, "input/dvb/networks/%s/muxes/%s/services",
-                         idnode_uuid_as_str(&ln->mn_id, ubuf1),
-                         idnode_uuid_as_str(&mm->mm_id, ubuf2));
+  c2 = NULL;
+  c = htsmsg_get_map(conf, "services");
+  if (c == NULL)
+    c = c2 = hts_settings_load_r(1, "input/dvb/networks/%s/muxes/%s/services",
+                                 idnode_uuid_as_str(&ln->mn_id, ubuf1),
+                                 idnode_uuid_as_str(&mm->mm_id, ubuf2));
+
   if (c) {
     HTSMSG_FOREACH(f, c) {
       if (!(e = htsmsg_get_map_by_field(f))) continue;
       mpegts_service_create1(f->hmf_name, (mpegts_mux_t *)lm, 0, 0, e);
     }
-    htsmsg_destroy(c);
+    htsmsg_destroy(c2);
   }
 
   if (ln->ln_type == DVB_TYPE_S) {

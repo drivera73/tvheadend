@@ -468,21 +468,24 @@ sbuf_read(sbuf_t *sb, int fd)
 }
 
 char *
-md5sum ( const char *str )
+md5sum ( const char *str, int lowercase )
 {
-  int i;
-  static unsigned char md5[MD5_DIGEST_LENGTH];
+  uint8_t md5[MD5_DIGEST_LENGTH];
   char *ret = malloc((MD5_DIGEST_LENGTH * 2) + 1);
+  int i;
+
   MD5((const unsigned char*)str, strlen(str), md5);
-  for ( i = 0; i < MD5_DIGEST_LENGTH; i++ ) {
-    sprintf(&ret[i*2], "%02X", md5[i]);
-  }
+  for (i = 0; i < MD5_DIGEST_LENGTH; i++)
+    sprintf(&ret[i*2], lowercase ? "%02x" : "%02X", md5[i]);
   ret[MD5_DIGEST_LENGTH*2] = '\0';
   return ret;
 }
 
+#define FILE_MODE_BITS(x) (x&(S_IRWXU|S_IRWXG|S_IRWXO))
+
 int
-makedirs ( const char *inpath, int mode, gid_t gid, uid_t uid )
+makedirs ( int subsys, const char *inpath, int mode,
+           int mstrict, gid_t gid, uid_t uid )
 {
   int err, ok;
   size_t x;
@@ -503,17 +506,26 @@ makedirs ( const char *inpath, int mode, gid_t gid, uid_t uid )
         err = mkdir(path, mode);
         if (!err && gid != -1 && uid != -1)
           err = chown(path, uid, gid);
-        if (!err)
+        if (!err && !stat(path, &st) &&
+            FILE_MODE_BITS(mode) != FILE_MODE_BITS(st.st_mode)) {
           err = chmod(path, mode); /* override umode */
-        tvhtrace("settings", "Creating directory \"%s\" with octal permissions "
-                             "\"%o\" gid %d uid %d", path, mode, gid, uid);
+          if (!mstrict) {
+            err = 0;
+            tvhwarn(subsys, "Unable to change directory permissions "
+                            "to \"%o\" for \"%s\" (keeping \"%o\")",
+                            mode, path, FILE_MODE_BITS(st.st_mode));
+            mode = FILE_MODE_BITS(st.st_mode);
+          }
+        }
+        tvhtrace(subsys, "Creating directory \"%s\" with octal permissions "
+                         "\"%o\" gid %d uid %d", path, mode, gid, uid);
       } else {
         err   = S_ISDIR(st.st_mode) ? 0 : 1;
         errno = ENOTDIR;
       }
       if (err) {
-        tvhlog(LOG_ALERT, "settings", "Unable to create dir \"%s\": %s",
-               path, strerror(errno));
+        tvhalert(subsys, "Unable to create dir \"%s\": %s",
+                 path, strerror(errno));
         return -1;
       }
       path[x] = '/';
@@ -657,7 +669,7 @@ static void
 deferred_unlink_cb(void *s, int dearmed)
 {
   if (unlink((const char *)s))
-    tvherror("main", "unable to remove file '%s'", (const char *)s);
+    tvherror(LS_MAIN, "unable to remove file '%s'", (const char *)s);
   free(s);
 }
 
@@ -674,7 +686,7 @@ deferred_unlink_dir_cb(void *s, int dearmed)
   int l;
 
   if (unlink((const char *)du->filename))
-    tvherror("main", "unable to remove file '%s'", (const char *)du->filename);
+    tvherror(LS_MAIN, "unable to remove file '%s'", (const char *)du->filename);
 
   /* Remove all directories up to rootdir */
 
@@ -784,12 +796,8 @@ htsmsg_t *network_interfaces_enum(void *obj, const char *lang)
 
   if (ifnames) {
     struct if_nameindex *ifname;
-    for (ifname = ifnames; ifname->if_name; ifname++) {
-      htsmsg_t *entry = htsmsg_create_map();
-      htsmsg_add_str(entry, "key", ifname->if_name);
-      htsmsg_add_str(entry, "val", ifname->if_name);
-      htsmsg_add_msg(list, NULL, entry);
-    }
+    for (ifname = ifnames; ifname->if_name; ifname++)
+      htsmsg_add_msg(list, NULL, htsmsg_create_key_val(ifname->if_name, ifname->if_name));
     if_freenameindex(ifnames);
   }
 
@@ -797,4 +805,13 @@ htsmsg_t *network_interfaces_enum(void *obj, const char *lang)
 #else
   return NULL;
 #endif
+}
+
+const char *
+gmtime2local(time_t gmt, char *buf, size_t buflen)
+{
+  struct tm tm;
+  localtime_r(&gmt, &tm);
+  strftime(buf, buflen, "%F;%T(%z)", &tm);
+  return buf;
 }

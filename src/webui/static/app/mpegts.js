@@ -67,9 +67,6 @@ tvheadend.networks = function(panel, index)
         titleP: _('Networks'),
         iconCls: 'networks',
         tabIndex: index,
-        help: function() {
-            new tvheadend.help(_('Networks'), 'config_networks.html');
-        },
         tbar: [scanButton],
         add: {
             titleS: _('Network'),
@@ -102,9 +99,6 @@ tvheadend.muxes = function(panel, index)
         iconCls: 'muxes',
         tabIndex: index,
         hidemode: true,
-        help: function() {
-            new tvheadend.help(_('Muxes'), 'config_muxes.html');
-        },            
         add: {
             titleS: _('Mux'),
             select: {
@@ -127,9 +121,12 @@ tvheadend.muxes = function(panel, index)
                 header: _('Play'),
                 tooltip: _('Play'),
                 renderer: function(v, o, r) {
-                    var title = r.data['name'] + ' / ' + r.data['network'];
-                    return "<a href='play/stream/mux/" + r.id +
-                           "?title=" + encodeURIComponent(title) + "'>" + _("Play") + "</a>";
+                    var title = r.data['name'];
+                    if (r.data['network']) {
+                        if (title) title += ' / ';
+                        title += r.data['network'];
+                    }
+                    return tvheadend.playLink('play/stream/mux/' + r.id, title);
                 }
             }
         ],
@@ -274,6 +271,48 @@ tvheadend.services = function(panel, index)
                 abuttons.map.setText(_('Map All'));
         };
 
+        var unseencb = function(type) {
+            tvheadend.Ajax({
+                url: 'api/service/removeunseen',
+                params: {
+                    type: type,
+                },    
+                success: function(d) {
+                    store.reload();
+                }
+            });
+        };
+
+        var maintenanceButton = {
+            name: 'misc',
+            builder: function() {
+                var m = new Ext.menu.Menu()
+                m.add({
+                    name: 'rmunsnpat',
+                    tooltip: _('Remove old services marked as missing in PAT/SDT which were not detected more than 7 days (last seen column)'),
+                    iconCls: 'remove',
+                    text: _('Remove unseen services (PAT/SDT) (7 days+)'),
+                });
+                m.add({
+                    name: 'rmunsn',
+                    tooltip: _('Remove old services which were not detected more than 7 days (last seen column)'),
+                    iconCls: 'remove',
+                    text: _('Remove all unseen services (7 days+)'),
+                });
+                return new Ext.Toolbar.Button({
+                    tooltip: _('Maintenance operations'),
+                    iconCls: 'wrench',
+                    text: _('Maintenance'),
+                    menu: m,
+                    disabled: false
+                });
+            },
+            callback: {
+                rmunsnpat: function() { unseencb('pat'); },
+                rmunsn: function() { unseencb(''); }
+            }
+        };
+
         var actions = new Ext.ux.grid.RowActions({
             header: _('Details'),
             width: 10,
@@ -296,7 +335,7 @@ tvheadend.services = function(panel, index)
             destroy: function() {
             }
         });
-        conf.tbar = [mapButton];
+        conf.tbar = [mapButton, maintenanceButton];
         conf.selected = selected;
         conf.lcol[1] = actions;
         conf.plugins = [actions];
@@ -317,18 +356,18 @@ tvheadend.services = function(panel, index)
         hidemode: true,
         add: false,
         del: true,
-        help: function() {
-            new tvheadend.help(_('Services'), 'config_services.html');
-        },         
         lcol: [
             {
                 width: 50,
                 header: _('Play'),
                 tooltip: _('Play'),
                 renderer: function(v, o, r) {
-                    var title = r.data['svcname'] + ' / ' + r.data['provider'];
-                    return "<a href='play/stream/service/" + r.id +
-                           "?title=" + encodeURIComponent(title) + "'>" + _('Play') + "</a>";
+                    var title = r.data['svcname'];
+                    if (r.data['provider']) {
+                        if (title) title += ' / ';
+                        title += r.data['provider'];
+                    }
+                    return tvheadend.playLink('play/stream/service/' + r.id, title);
                 }
             },
             {
@@ -352,9 +391,7 @@ tvheadend.mux_sched = function(panel, index)
         titleP: _('Mux Schedulers'),
         iconCls: 'muxSchedulers',
         tabIndex: index,
-        help: function() {
-            new tvheadend.help(_('Mux Schedulers'), 'config_muxsched.html');
-        },          
+        uilevel: 'expert',
         hidemode: true,
         add: {
             url: 'api/mpegts/mux_sched',

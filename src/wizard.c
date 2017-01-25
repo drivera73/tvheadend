@@ -16,7 +16,12 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Use http://spec.commonmark.org/ as reference for description formatting.
+ */
+
 #include "tvheadend.h"
+#include "htsbuf.h"
 #include "config.h"
 #include "access.h"
 #include "settings.h"
@@ -37,8 +42,27 @@ static const void *empty_get(void *o)
 
 static const void *icon_get(void *o)
 {
-  strcpy(prop_sbuf, "docresources/tvheadendlogo.png");
+  strcpy(prop_sbuf, "static/img/logobig.png");
   return &prop_sbuf_ptr;
+}
+
+static const void *description_get(wizard_page_t *page, const char **doc)
+{
+  htsbuf_queue_t q;
+
+  if (!page->desc) {
+    htsbuf_queue_init(&q, 0);
+    for (; *doc; doc++) {
+      if (*doc[0] == '\xff') {
+        htsbuf_append_str(&q, tvh_gettext_lang(config.language_ui, *doc + 1));
+      } else {
+        htsbuf_append_str(&q, *doc);
+      }
+    }
+    page->desc = htsbuf_to_string(&q);
+    htsbuf_queue_flush(&q);
+  }
+  return &page->desc;
 }
 
 #define SPECIAL_PROP(idval, getfcn) { \
@@ -56,11 +80,11 @@ static const void *icon_get(void *o)
 #define DESCRIPTION(page) SPECIAL_PROP("description", wizard_description_##page)
 #define PROGRESS(fcn)     SPECIAL_PROP("progress", fcn)
 
-#define DESCRIPTION_FCN(page, desc) \
+#define DESCRIPTION_FCN(page) \
+extern const char *tvh_doc_wizard_##page[]; \
 static const void *wizard_description_##page(void *o) \
 { \
-  static const char *t = desc; \
-  return &t; \
+  return description_get(o, tvh_doc_wizard_##page); \
 }
 
 #define BASIC_STR_OPS(stru, field) \
@@ -85,6 +109,7 @@ static int wizard_set_value_##field(void *o, const void *v) \
 
 static void page_free(wizard_page_t *page)
 {
+  free(page->desc);
   free(page->aux);
   free((char *)page->idnode.in_class);
   free(page);
@@ -116,7 +141,7 @@ typedef struct wizard_hello {
 } wizard_hello_t;
 
 
-static void hello_save(idnode_t *in)
+static void hello_changed(idnode_t *in)
 {
   wizard_page_t *p = (wizard_page_t *)in;
   wizard_hello_t *w = p->aux;
@@ -142,7 +167,7 @@ static void hello_save(idnode_t *in)
     save = 1;
   }
   if (save)
-    config_save();
+    idnode_changed(&config.idnode);
 }
 
 BASIC_STR_OPS(wizard_hello_t, ui_lang)
@@ -150,12 +175,7 @@ BASIC_STR_OPS(wizard_hello_t, epg_lang1)
 BASIC_STR_OPS(wizard_hello_t, epg_lang2)
 BASIC_STR_OPS(wizard_hello_t, epg_lang3)
 
-DESCRIPTION_FCN(hello, N_("\
-Enter the languages for the web user interface and \
-for EPG texts.\n\
-This wizard should be run only on the initial setup. Please, cancel \
-it, if you are not willing to touch the current configuration.\
-"))
+DESCRIPTION_FCN(hello)
 
 wizard_page_t *wizard_hello(const char *lang)
 {
@@ -176,8 +196,8 @@ wizard_page_t *wizard_hello(const char *lang)
       .id       = "ui_lang",
       .name     = N_("Language"),
       .desc     = N_("Select the default user interface language. "
-                     "This can be overridden later in access entries "
-                     "on a per user basis."),
+                     "This can be overridden later in \"Access Entries\" "
+                     "on a per-user basis."),
       .get      = wizard_get_value_ui_lang,
       .set      = wizard_set_value_ui_lang,
       .list     = language_get_ui_list,
@@ -230,7 +250,7 @@ wizard_page_t *wizard_hello(const char *lang)
 
   ic->ic_properties = props;
   ic->ic_groups = groups;
-  ic->ic_save = hello_save;
+  ic->ic_changed = hello_changed;
   page->aux = w = calloc(1, sizeof(wizard_hello_t));
 
   if (config.language_ui)
@@ -266,7 +286,7 @@ typedef struct wizard_login {
 } wizard_login_t;
 
 
-static void login_save(idnode_t *in)
+static void login_changed(idnode_t *in)
 {
   wizard_page_t *p = (wizard_page_t *)in;
   wizard_login_t *w = p->aux;
@@ -292,7 +312,6 @@ static void login_save(idnode_t *in)
   htsmsg_add_bool(conf, "enabled", 1);
   htsmsg_add_str(conf, "prefix", w->network);
   htsmsg_add_str(conf, "username", s);
-  htsmsg_add_str(conf, "password", w->admin_password);
   htsmsg_add_bool(conf, "streaming", 1);
   htsmsg_add_bool(conf, "adv_streaming", 1);
   htsmsg_add_bool(conf, "htsp_streaming", 1);
@@ -303,11 +322,11 @@ static void login_save(idnode_t *in)
   ae = access_entry_create(NULL, conf);
   if (ae) {
     ae->ae_wizard = 1;
-    access_entry_save(ae);
+    idnode_changed(&ae->ae_id);
   }
   htsmsg_destroy(conf);
 
-  if (s && s[0] != '*' && w->admin_password[0]) {
+  if (s[0] != '*' && w->admin_password[0]) {
     conf = htsmsg_create_map();
     htsmsg_add_bool(conf, "enabled", 1);
     htsmsg_add_str(conf, "username", s);
@@ -315,7 +334,7 @@ static void login_save(idnode_t *in)
     pw = passwd_entry_create(NULL, conf);
     if (pw) {
       pw->pw_wizard = 1;
-      passwd_entry_save(pw);
+      idnode_changed(&pw->pw_id);
     }
     htsmsg_destroy(conf);
   }
@@ -323,13 +342,18 @@ static void login_save(idnode_t *in)
   if (w->username[0]) {
     s = w->username[0] ? w->username : "*";
     conf = htsmsg_create_map();
+    htsmsg_add_bool(conf, "enabled", 1);
     htsmsg_add_str(conf, "prefix", w->network);
     htsmsg_add_str(conf, "username", s);
-    htsmsg_add_str(conf, "password", w->password);
+    htsmsg_add_bool(conf, "streaming", 1);
+    htsmsg_add_bool(conf, "htsp_streaming", 1);
+    htsmsg_add_bool(conf, "dvr", 1);
+    htsmsg_add_bool(conf, "htsp_dvr", 1);
+    htsmsg_add_bool(conf, "webui", 1);
     ae = access_entry_create(NULL, conf);
     if (ae) {
       ae->ae_wizard = 1;
-      access_entry_save(ae);
+      idnode_changed(&ae->ae_id);
     }
     htsmsg_destroy(conf);
 
@@ -341,7 +365,7 @@ static void login_save(idnode_t *in)
       pw = passwd_entry_create(NULL, conf);
       if (pw) {
         pw->pw_wizard = 1;
-        passwd_entry_save(pw);
+        idnode_changed(&pw->pw_id);
       }
       htsmsg_destroy(conf);
     }
@@ -354,18 +378,7 @@ BASIC_STR_OPS(wizard_login_t, admin_password)
 BASIC_STR_OPS(wizard_login_t, username)
 BASIC_STR_OPS(wizard_login_t, password)
 
-DESCRIPTION_FCN(login, N_("\
-Enter the access control details to secure your system. \
-The first part of this covers the IPv4 network details \
-for address-based access to the system; for example, \
-192.168.1.0/24 to allow local access only to 192.168.1.x clients, \
-or 0.0.0.0/0 or empty value for access from any system.\n\
-This works alongside the second part, which is a familiar \
-username/password combination, so provide these for both \
-an administrator and regular (day-to-day) user. \
-You can leave the username and password blank if you don't want \
-this part, and would prefer anonymous access to anyone.\n\
-"))
+DESCRIPTION_FCN(login)
 
 wizard_page_t *wizard_login(const char *lang)
 {
@@ -389,7 +402,8 @@ wizard_page_t *wizard_login(const char *lang)
       .type     = PT_STR,
       .id       = "network",
       .name     = N_("Allowed network"),
-      .desc     = N_("Enter allowed network prefixes."),
+      .desc     = N_("Enter allowed network prefix(es). You can enter a "
+                     "comma-seperated list of prefixes here."),
       .get      = wizard_get_value_network,
       .set      = wizard_set_value_network,
       .group    = 1
@@ -448,7 +462,7 @@ wizard_page_t *wizard_login(const char *lang)
 
   ic->ic_properties = props;
   ic->ic_groups = groups;
-  ic->ic_save = login_save;
+  ic->ic_changed = login_changed;
   page->aux = w = calloc(1, sizeof(wizard_login_t));
 
   TAILQ_FOREACH(ae, &access_entries, ae_link) {
@@ -503,7 +517,7 @@ static void network_free(wizard_page_t *page)
   page_free(page);
 }
 
-static void network_save(idnode_t *in)
+static void network_changed(idnode_t *in)
 {
   wizard_page_t *p = (wizard_page_t *)in;
   wizard_network_t *w = p->aux;
@@ -542,6 +556,7 @@ static void network_save(idnode_t *in)
   .type = PT_STR, \
   .id   = "tuner" STRINGIFY(num), \
   .name = N_("Tuner"), \
+  .desc = N_("Name of the tuner."), \
   .get  = network_get_tvalue##num, \
   .opts = PO_RDONLY, \
   .group = num, \
@@ -549,6 +564,7 @@ static void network_save(idnode_t *in)
   .type = PT_STR, \
   .id   = "tunerid" STRINGIFY(num), \
   .name = "Tuner", \
+  .desc = N_("Name of the tuner."), \
   .get  = network_get_tidvalue##num, \
   .set  = network_set_tidvalue##num, \
   .opts = PO_PERSIST | PO_NOUI, \
@@ -556,6 +572,7 @@ static void network_save(idnode_t *in)
   .type = PT_STR, \
   .id   = "network" STRINGIFY(num), \
   .name = N_("Network type"), \
+  .desc = N_("Select an available network type for this tuner."), \
   .get  = network_get_value##num, \
   .set  = network_set_value##num, \
   .list = network_get_list##num, \
@@ -613,11 +630,7 @@ NETWORK_FCN(4)
 NETWORK_FCN(5)
 NETWORK_FCN(6)
 
-DESCRIPTION_FCN(network, N_("\
-Select network type for detected tuners.\n\
-The T means terresterial, C is cable and S is satellite.\
-"))
-
+DESCRIPTION_FCN(network)
 
 wizard_page_t *wizard_network(const char *lang)
 {
@@ -656,7 +669,7 @@ wizard_page_t *wizard_network(const char *lang)
   page->aux = w = calloc(1, sizeof(wizard_network_t));
   ic->ic_groups = groups;
   ic->ic_properties = w->props;
-  ic->ic_save = network_save;
+  ic->ic_changed = network_changed;
   page->free = network_free;
   snprintf(w->lang, sizeof(w->lang), "%s", lang ?: "");
 
@@ -713,7 +726,7 @@ static void muxes_free(wizard_page_t *page)
   page_free(page);
 }
 
-static void muxes_save(idnode_t *in)
+static void muxes_changed(idnode_t *in)
 {
   wizard_page_t *p = (wizard_page_t *)in;
   wizard_muxes_t *w = p->aux;
@@ -731,10 +744,11 @@ static void muxes_save(idnode_t *in)
     }
 #if ENABLE_IPTV
       else if (idnode_is_instance(&mn->mn_id, &iptv_auto_network_class) &&
-               w->iptv_url[idx]) {
+               w->iptv_url[idx][0]) {
       htsmsg_t *m = htsmsg_create_map();
       htsmsg_add_str(m, "url", w->iptv_url[idx]);
       idnode_load(&mn->mn_id, m);
+      idnode_changed(&mn->mn_id);
       htsmsg_destroy(m);
     }
 #endif
@@ -777,6 +791,7 @@ static const void *muxes_progress_get(void *o)
   .type = PT_STR, \
   .id   = "network" STRINGIFY(num), \
   .name = N_("Network"), \
+  .desc = N_("Name of the network."), \
   .get  = muxes_get_nvalue##num, \
   .opts = PO_RDONLY, \
   .group = num, \
@@ -784,6 +799,7 @@ static const void *muxes_progress_get(void *o)
   .type = PT_STR, \
   .id   = "networkid" STRINGIFY(num), \
   .name = "Network", \
+  .desc = N_("ID of the network."), \
   .get  = muxes_get_idvalue##num, \
   .set  = muxes_set_idvalue##num, \
   .opts = PO_PERSIST | PO_NOUI, \
@@ -840,7 +856,19 @@ static htsmsg_t *muxes_get_list##num(void *o, const char *lang) \
   wizard_muxes_t *w = p->aux; \
   mpegts_network_t *mn = mpegts_network_find(w->networkid[num-1]); \
   return mn ? dvb_network_class_scanfile_list(mn, lang) : NULL; \
-} \
+}
+
+
+MUXES_FCN(1)
+MUXES_FCN(2)
+MUXES_FCN(3)
+MUXES_FCN(4)
+MUXES_FCN(5)
+MUXES_FCN(6)
+
+#if ENABLE_IPTV
+
+#define MUXES_IPTV_FCN(num) \
 static const void *muxes_get_iptv_value##num(void *o) \
 { \
   wizard_page_t *p = o; \
@@ -856,16 +884,16 @@ static int muxes_set_iptv_value##num(void *o, const void *v) \
   return 1; \
 }
 
-MUXES_FCN(1)
-MUXES_FCN(2)
-MUXES_FCN(3)
-MUXES_FCN(4)
-MUXES_FCN(5)
-MUXES_FCN(6)
+MUXES_IPTV_FCN(1)
+MUXES_IPTV_FCN(2)
+MUXES_IPTV_FCN(3)
+MUXES_IPTV_FCN(4)
+MUXES_IPTV_FCN(5)
+MUXES_IPTV_FCN(6)
 
-DESCRIPTION_FCN(muxes, N_("\
-Assign predefined muxes to networks.\
-"))
+#endif
+
+DESCRIPTION_FCN(muxes)
 
 wizard_page_t *wizard_muxes(const char *lang)
 {
@@ -911,7 +939,7 @@ wizard_page_t *wizard_muxes(const char *lang)
   page->aux = w = calloc(1, sizeof(wizard_muxes_t));
   ic->ic_groups = groups;
   ic->ic_properties = w->props;
-  ic->ic_save = muxes_save;
+  ic->ic_changed = muxes_changed;
   page->free = muxes_free;
   snprintf(w->lang, sizeof(w->lang), "%s", lang ?: "");
 
@@ -948,11 +976,7 @@ wizard_page_t *wizard_muxes(const char *lang)
  * Status
  */
 
-DESCRIPTION_FCN(status, N_("\
-Show the scan status.\n\
-Please, wait until the scan finishes.\
-"))
-
+DESCRIPTION_FCN(status)
 
 wizard_page_t *wizard_status(const char *lang)
 {
@@ -1006,7 +1030,7 @@ typedef struct wizard_mapping {
   int nettags;
 } wizard_mapping_t;
 
-static void mapping_save(idnode_t *in)
+static void mapping_changed(idnode_t *in)
 {
   wizard_page_t *p = (wizard_page_t *)in;
   wizard_mapping_t *w = p->aux;
@@ -1043,12 +1067,7 @@ MAPPING_FCN(mapall)
 MAPPING_FCN(provtags)
 MAPPING_FCN(nettags)
 
-DESCRIPTION_FCN(mapping, N_("\
-Map all discovered services to channels.\n\
-Note: You may ommit this step (do not check the map all services) and\
-do the service to channel mapping manually.\n\
-"))
-
+DESCRIPTION_FCN(mapping)
 
 wizard_page_t *wizard_mapping(const char *lang)
 {
@@ -1057,6 +1076,8 @@ wizard_page_t *wizard_mapping(const char *lang)
       .type     = PT_BOOL,
       .id       = "mapall",
       .name     = N_("Map all services"),
+      .desc     = N_("Automatically map all available services to "
+                     "channels."),
       .get      = mapping_get_mapall,
       .set      = mapping_set_mapall,
     },
@@ -1064,6 +1085,8 @@ wizard_page_t *wizard_mapping(const char *lang)
       .type     = PT_BOOL,
       .id       = "provtags",
       .name     = N_("Create provider tags"),
+      .desc     = N_("Create and associate a provider tag to created "
+                     "channels."),
       .get      = mapping_get_provtags,
       .set      = mapping_set_provtags,
     },
@@ -1071,6 +1094,8 @@ wizard_page_t *wizard_mapping(const char *lang)
       .type     = PT_BOOL,
       .id       = "nettags",
       .name     = N_("Create network tags"),
+      .desc     = N_("Create and associate a network tag to created "
+                     "channels."),
       .get      = mapping_get_nettags,
       .set      = mapping_set_nettags,
     },
@@ -1078,14 +1103,13 @@ wizard_page_t *wizard_mapping(const char *lang)
     DESCRIPTION(mapping),
     PREV_BUTTON(status),
     NEXT_BUTTON(channels),
-    LAST_BUTTON(),
     {}
   };
   wizard_page_t *page = page_init("mapping", "wizard_mapping", N_("Service mapping"));
   idclass_t *ic = (idclass_t *)page->idnode.in_class;
   wizard_mapping_t *w;
   ic->ic_properties = props;
-  ic->ic_save = mapping_save;
+  ic->ic_changed = mapping_changed;
   page->aux = w = calloc(1, sizeof(wizard_mapping_t));
   w->provtags = service_mapper_conf.d.provider_tags;
   w->nettags = service_mapper_conf.d.network_tags;
@@ -1096,11 +1120,27 @@ wizard_page_t *wizard_mapping(const char *lang)
  * Discovered channels
  */
 
-DESCRIPTION_FCN(channels, N_("\
-You are finished now.\n\
-You may further customize your settings by editing channel numbers etc.\
-"))
+static void channels_changed(idnode_t *in)
+{
+  access_entry_t *ae, *ae_next;
 
+  /* check, if we have another admin account */
+  TAILQ_FOREACH(ae, &access_entries, ae_link)
+    if (ae->ae_admin && ae->ae_wizard) break;
+  if (ae == NULL)
+    return;
+  /* remove the default access entry */
+  for (ae = TAILQ_FIRST(&access_entries); ae; ae = ae_next) {
+    ae_next = TAILQ_NEXT(ae, ae_link);
+    if (strcmp(ae->ae_comment, ACCESS_DEFAULT_COMMENT) == 0) {
+      access_entry_destroy(ae, 1);
+      break;
+    }
+  }
+}
+
+DESCRIPTION_FCN(channels)
+DESCRIPTION_FCN(channels2)
 
 wizard_page_t *wizard_channels(const char *lang)
 {
@@ -1111,8 +1151,24 @@ wizard_page_t *wizard_channels(const char *lang)
     LAST_BUTTON(),
     {}
   };
-  wizard_page_t *page = page_init("channels", "wizard_channels", N_("Service mapping"));
+  static const property_t props2[] = {
+    ICON(),
+    DESCRIPTION(channels2),
+    PREV_BUTTON(mapping),
+    LAST_BUTTON(),
+    {}
+  };
+  wizard_page_t *page = page_init("channels", "wizard_channels", N_("Finished"));
   idclass_t *ic = (idclass_t *)page->idnode.in_class;
+  access_entry_t *ae;
+
   ic->ic_properties = props;
+  ic->ic_flags |= IDCLASS_ALWAYS_SAVE;
+  ic->ic_changed = channels_changed;
+  /* do we have an admin created by wizard? */
+  TAILQ_FOREACH(ae, &access_entries, ae_link)
+    if (ae->ae_admin && ae->ae_wizard) break;
+  if (ae == NULL)
+    ic->ic_properties = props2;
   return page;
 }

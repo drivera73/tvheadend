@@ -71,6 +71,9 @@
 #include "profile.h"
 #include "bouquet.h"
 #include "tvhtime.h"
+#include "packet.h"
+#include "streaming.h"
+#include "memoryinfo.h"
 
 #ifdef PLATFORM_LINUX
 #include <sys/prctl.h>
@@ -82,6 +85,9 @@
 #include <openssl/engine.h>
 
 pthread_t main_tid;
+
+int64_t   __mdispatch_clock;
+time_t    __gdispatch_clock;
 
 /* Command line option struct */
 typedef struct {
@@ -173,11 +179,17 @@ pthread_mutex_t atomic_lock;
 /*
  * Locals
  */
+static LIST_HEAD(, mtimer) mtimers;
+static tvh_cond_t mtimer_cond;
+static int64_t mtimer_periodic;
+static pthread_t mtimer_tid;
+static pthread_t mtimer_tick_tid;
 static LIST_HEAD(, gtimer) gtimers;
 static pthread_cond_t gtimer_cond;
 static TAILQ_HEAD(, tasklet) tasklets;
-static pthread_cond_t tasklet_cond;
+static tvh_cond_t tasklet_cond;
 static pthread_t tasklet_tid;
+static memoryinfo_t tasklet_memoryinfo = { .my_name = "Tasklet" };
 
 static void
 handle_sigpipe(int x)
@@ -191,7 +203,7 @@ handle_sigill(int x)
   /* Note that on some platforms, the SSL library tries */
   /* to determine the CPU capabilities with possible */
   /* unknown instructions */
-  tvhwarn("CPU", "Illegal instruction handler (might be OK)");
+  tvhwarn(LS_CPU, "Illegal instruction handler (might be OK)");
   signal(SIGILL, handle_sigill);
 }
 
@@ -201,7 +213,8 @@ doexit(int x)
   if (pthread_self() != main_tid)
     pthread_kill(main_tid, SIGTERM);
   pthread_cond_signal(&gtimer_cond);
-  tvheadend_running = 0;
+  tvh_cond_signal(&mtimer_cond, 1);
+  atomic_set(&tvheadend_running, 0);
   signal(x, doexit);
 }
 
@@ -226,26 +239,82 @@ get_user_groups (const struct passwd *pw, gid_t* glist, size_t gmax)
 /**
  *
  */
+
+#define safecmp(a, b) ((a) > (b) ? 1 : ((a) < (b) ? -1 : 0))
+
 static int
-gtimercmp(gtimer_t *a, gtimer_t *b)
+mtimercmp(mtimer_t *a, mtimer_t *b)
 {
-  if(a->gti_expire.tv_sec  < b->gti_expire.tv_sec)
-    return -1;
-  if(a->gti_expire.tv_sec  > b->gti_expire.tv_sec)
-    return 1;
-  if(a->gti_expire.tv_nsec < b->gti_expire.tv_nsec)
-    return -1;
-  if(a->gti_expire.tv_nsec > b->gti_expire.tv_nsec)
-    return 1;
- return 0;
+  return safecmp(a->mti_expire, b->mti_expire);
 }
 
 /**
  *
  */
 void
-GTIMER_FCN(gtimer_arm_abs2)
-  (GTIMER_TRACEID_ gtimer_t *gti, gti_callback_t *callback, void *opaque, struct timespec *when)
+GTIMER_FCN(mtimer_arm_abs)
+  (GTIMER_TRACEID_ mtimer_t *mti, mti_callback_t *callback, void *opaque, int64_t when)
+{
+  lock_assert(&global_lock);
+
+  if (mti->mti_callback != NULL)
+    LIST_REMOVE(mti, mti_link);
+
+  mti->mti_callback = callback;
+  mti->mti_opaque   = opaque;
+  mti->mti_expire   = when;
+#if ENABLE_GTIMER_CHECK
+  mti->mti_id       = id;
+  mti->mti_fcn      = fcn;
+#endif
+
+  LIST_INSERT_SORTED(&mtimers, mti, mti_link, mtimercmp);
+
+  if (LIST_FIRST(&mtimers) == mti)
+    tvh_cond_signal(&mtimer_cond, 0); // force timer re-check
+}
+
+/**
+ *
+ */
+void
+GTIMER_FCN(mtimer_arm_rel)
+  (GTIMER_TRACEID_ mtimer_t *gti, mti_callback_t *callback, void *opaque, int64_t delta)
+{
+#if ENABLE_GTIMER_CHECK
+  GTIMER_FCN(mtimer_arm_abs)(id, fcn, gti, callback, opaque, mclk() + delta);
+#else
+  mtimer_arm_abs(gti, callback, opaque, mclk() + delta);
+#endif
+}
+
+/**
+ *
+ */
+void
+mtimer_disarm(mtimer_t *mti)
+{
+  if(mti->mti_callback) {
+    LIST_REMOVE(mti, mti_link);
+    mti->mti_callback = NULL;
+  }
+}
+
+/**
+ *
+ */
+static int
+gtimercmp(gtimer_t *a, gtimer_t *b)
+{
+  return safecmp(a->gti_expire, b->gti_expire);
+}
+
+/**
+ *
+ */
+void
+GTIMER_FCN(gtimer_arm_absn)
+  (GTIMER_TRACEID_ gtimer_t *gti, gti_callback_t *callback, void *opaque, time_t when)
 {
   lock_assert(&global_lock);
 
@@ -254,7 +323,7 @@ GTIMER_FCN(gtimer_arm_abs2)
 
   gti->gti_callback = callback;
   gti->gti_opaque   = opaque;
-  gti->gti_expire   = *when;
+  gti->gti_expire   = when;
 #if ENABLE_GTIMER_CHECK
   gti->gti_id       = id;
   gti->gti_fcn      = fcn;
@@ -270,49 +339,13 @@ GTIMER_FCN(gtimer_arm_abs2)
  *
  */
 void
-GTIMER_FCN(gtimer_arm_abs)
-  (GTIMER_TRACEID_ gtimer_t *gti, gti_callback_t *callback, void *opaque, time_t when)
-{
-  struct timespec ts;
-  ts.tv_nsec = 0;
-  ts.tv_sec  = when;
-#if ENABLE_GTIMER_CHECK
-  GTIMER_FCN(gtimer_arm_abs2)(id, fcn, gti, callback, opaque, &ts);
-#else
-  gtimer_arm_abs2(gti, callback, opaque, &ts);
-#endif
-}
-
-/**
- *
- */
-void
-GTIMER_FCN(gtimer_arm)
-  (GTIMER_TRACEID_ gtimer_t *gti, gti_callback_t *callback, void *opaque, int delta)
+GTIMER_FCN(gtimer_arm_rel)
+  (GTIMER_TRACEID_ gtimer_t *gti, gti_callback_t *callback, void *opaque, time_t delta)
 {
 #if ENABLE_GTIMER_CHECK
-  GTIMER_FCN(gtimer_arm_abs)(id, fcn, gti, callback, opaque, dispatch_clock + delta);
+  GTIMER_FCN(gtimer_arm_absn)(id, fcn, gti, callback, opaque, gclk() + delta);
 #else
-  gtimer_arm_abs(gti, callback, opaque, dispatch_clock + delta);
-#endif
-}
-
-/**
- *
- */
-void
-GTIMER_FCN(gtimer_arm_ms)
-  (GTIMER_TRACEID_ gtimer_t *gti, gti_callback_t *callback, void *opaque, long delta_ms )
-{
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  ts.tv_nsec += (1000000 * delta_ms);
-  ts.tv_sec  += (ts.tv_nsec / 1000000000);
-  ts.tv_nsec %= 1000000000;
-#if ENABLE_GTIMER_CHECK
-  GTIMER_FCN(gtimer_arm_abs2)(id, fcn, gti, callback, opaque, &ts);
-#else
-  gtimer_arm_abs2(gti, callback, opaque, &ts);
+  gtimer_arm_absn(gti, callback, opaque, gclk() + delta);
 #endif
 }
 
@@ -336,6 +369,7 @@ tasklet_arm_alloc(tsk_callback_t *callback, void *opaque)
 {
   tasklet_t *tsk = calloc(1, sizeof(*tsk));
   if (tsk) {
+    memoryinfo_alloc(&tasklet_memoryinfo, sizeof(*tsk));
     tsk->tsk_allocated = 1;
     tasklet_arm(tsk, callback, opaque);
   }
@@ -359,7 +393,7 @@ tasklet_arm(tasklet_t *tsk, tsk_callback_t *callback, void *opaque)
   TAILQ_INSERT_TAIL(&tasklets, tsk, tsk_link);
 
   if (TAILQ_FIRST(&tasklets) == tsk)
-    pthread_cond_signal(&tasklet_cond);
+    tvh_cond_signal(&tasklet_cond, 0);
 
   pthread_mutex_unlock(&tasklet_lock);
 }
@@ -394,8 +428,10 @@ tasklet_flush()
     TAILQ_REMOVE(&tasklets, tsk, tsk_link);
     tsk->tsk_callback(tsk->tsk_opaque, 1);
     tsk->tsk_callback = NULL;
-    if (tsk->tsk_allocated)
+    if (tsk->tsk_allocated) {
+      memoryinfo_free(&tasklet_memoryinfo, sizeof(*tsk));
       free(tsk);
+    }
   }
 
   pthread_mutex_unlock(&tasklet_lock);
@@ -408,21 +444,33 @@ static void *
 tasklet_thread ( void *aux )
 {
   tasklet_t *tsk;
+  tsk_callback_t *tsk_cb;
+  void *opaque;
+
+  tvhtread_renice(20);
 
   pthread_mutex_lock(&tasklet_lock);
-  while (tvheadend_running) {
+  while (tvheadend_is_running()) {
     tsk = TAILQ_FIRST(&tasklets);
     if (tsk == NULL) {
-      pthread_cond_wait(&tasklet_cond, &tasklet_lock);
+      tvh_cond_wait(&tasklet_cond, &tasklet_lock);
       continue;
     }
-    if (tsk->tsk_callback) {
-      tsk->tsk_callback(tsk->tsk_opaque, 0);
-      tsk->tsk_callback = NULL;
-    }
+    /* the callback might re-initialize tasklet, save everythin */
     TAILQ_REMOVE(&tasklets, tsk, tsk_link);
-    if (tsk->tsk_allocated)
+    tsk_cb = tsk->tsk_callback;
+    opaque = tsk->tsk_opaque;
+    tsk->tsk_callback = NULL;
+    if (tsk->tsk_allocated) {
+      memoryinfo_free(&tasklet_memoryinfo, sizeof(*tsk));
       free(tsk);
+    }
+    /* now, the callback can be safely called */
+    if (tsk_cb) {
+      pthread_mutex_unlock(&tasklet_lock);
+      tsk_cb(opaque, 0);
+      pthread_mutex_lock(&tasklet_lock);
+    }
   }
   pthread_mutex_unlock(&tasklet_lock);
 
@@ -486,22 +534,122 @@ show_usage
 }
 
 /**
+ * Show subsystems info
+ */
+static void
+show_subsystems(const char *argv0)
+{
+  int i;
+  tvhlog_subsys_t *ts = tvhlog_subsystems;
+  printf("Subsystems:\n\n");
+  for (i = 1, ts++; i < LS_LAST; i++, ts++) {
+    printf("  %-15s %s\n", ts->name, _(ts->desc));
+  }
+  exit(0);
+}
+
+/**
  *
  */
-time_t
-dispatch_clock_update(struct timespec *ts)
+static inline time_t
+gdispatch_clock_update(void)
 {
-  struct timespec ts1;
-  if (ts == NULL)
-    ts = &ts1;
-  clock_gettime(CLOCK_REALTIME, ts);
+  time_t now = time(NULL);
+  atomic_set_time_t(&__gdispatch_clock, now);
+  return now;
+}
 
-  /* 1sec stuff */
-  if (ts->tv_sec > dispatch_clock) {
-    dispatch_clock = ts->tv_sec;
+/**
+ *
+ */
+static int64_t
+mdispatch_clock_update(void)
+{
+  int64_t mono = getmonoclock();
+
+  if (mono > atomic_get_s64(&mtimer_periodic)) {
+    atomic_set_s64(&mtimer_periodic, mono + MONOCLOCK_RESOLUTION);
+    gdispatch_clock_update(); /* gclk() update */
     comet_flush(); /* Flush idle comet mailboxes */
   }
-  return dispatch_clock;
+
+  atomic_set_s64(&__mdispatch_clock, mono);
+  return mono;
+}
+
+/**
+ *
+ */
+static void *
+mtimer_tick_thread(void *aux)
+{
+  while (tvheadend_is_running()) {
+    /* update clocks each 10x in one second */
+    atomic_set_s64(&__mdispatch_clock, getmonoclock());
+    tvh_safe_usleep(100000);
+  }
+  return NULL;
+}
+
+/**
+ *
+ */
+static void *
+mtimer_thread(void *aux)
+{
+  mtimer_t *mti;
+  mti_callback_t *cb;
+  int64_t now, next;
+#if ENABLE_GTIMER_CHECK
+  int64_t mtm;
+  const char *id;
+  const char *fcn;
+#endif
+
+  while (tvheadend_is_running()) {
+    now = mdispatch_clock_update();
+
+    /* Global monoclock timers */
+    pthread_mutex_lock(&global_lock);
+
+    next = now + sec2mono(3600);
+
+    while((mti = LIST_FIRST(&mtimers)) != NULL) {
+      
+      if (mti->mti_expire > now) {
+        next = mti->mti_expire;
+        break;
+      }
+
+#if ENABLE_GTIMER_CHECK
+      mtm = getmonoclock();
+      id = mti->mti_id;
+      fcn = mti->mti_fcn;
+#endif
+      cb = mti->mti_callback;
+
+      LIST_REMOVE(mti, mti_link);
+      mti->mti_callback = NULL;
+
+      cb(mti->mti_opaque);
+
+#if ENABLE_GTIMER_CHECK
+      mtm = getmonoclock() - mtm;
+      if (mtm > 10000)
+        tvhtrace(LS_MTIMER, "%s:%s duration %"PRId64"us", id, fcn, mtm);
+#endif
+    }
+
+    /* Periodic updates */
+    if (next > mtimer_periodic)
+      next = mtimer_periodic;
+
+    /* Wait */
+    tvh_cond_timedwait(&mtimer_cond, &global_lock, next);
+    pthread_mutex_unlock(&global_lock);
+  }
+  
+  return NULL;
 }
 
 /**
@@ -512,6 +660,7 @@ mainloop(void)
 {
   gtimer_t *gti;
   gti_callback_t *cb;
+  time_t now;
   struct timespec ts;
 #if ENABLE_GTIMER_CHECK
   int64_t mtm;
@@ -519,8 +668,10 @@ mainloop(void)
   const char *fcn;
 #endif
 
-  while(tvheadend_running) {
-    dispatch_clock_update(&ts);
+  while (tvheadend_is_running()) {
+    now = gdispatch_clock_update();
+    ts.tv_sec  = now + 3600;
+    ts.tv_nsec = 0;
 
     /* Global timers */
     pthread_mutex_lock(&global_lock);
@@ -529,18 +680,15 @@ mainloop(void)
     //       the top of the list with a 0 offset we could loop indefinitely
     
 #if 0
-    tvhdebug("gtimer", "now %ld.%09ld", ts.tv_sec, ts.tv_nsec);
+    tvhdebug(LS_GTIMER, "now %"PRItime_t, ts.tv_sec);
     LIST_FOREACH(gti, &gtimers, gti_link)
-      tvhdebug("gtimer", "  gti %p expire %ld.%08ld",
-               gti, gti->gti_expire.tv_sec, gti->gti_expire.tv_nsec);
+      tvhdebug(LS_GTIMER, "  gti %p expire %"PRItimet, gti, gti->gti_expire.tv_sec);
 #endif
 
     while((gti = LIST_FIRST(&gtimers)) != NULL) {
       
-      if ((gti->gti_expire.tv_sec > ts.tv_sec) ||
-          ((gti->gti_expire.tv_sec == ts.tv_sec) &&
-           (gti->gti_expire.tv_nsec > ts.tv_nsec))) {
-        ts = gti->gti_expire;
+      if (gti->gti_expire > now) {
+        ts.tv_sec = gti->gti_expire;
         break;
       }
 
@@ -557,14 +705,10 @@ mainloop(void)
       cb(gti->gti_opaque);
 
 #if ENABLE_GTIMER_CHECK
-      tvhtrace("gtimer", "%s:%s duration %"PRId64"ns", id, fcn, getmonoclock() - mtm);
+      mtm = getmonoclock() - mtm;
+      if (mtm > 10000)
+        tvhtrace(LS_GTIMER, "%s:%s duration %"PRId64"us", id, fcn, mtm);
 #endif
-    }
-
-    /* Bound wait */
-    if ((LIST_FIRST(&gtimers) == NULL) || (ts.tv_sec > (dispatch_clock + 1))) {
-      ts.tv_sec  = dispatch_clock + 1;
-      ts.tv_nsec = 0;
     }
 
     /* Wait */
@@ -606,8 +750,9 @@ main(int argc, char **argv)
   pthread_mutex_init(&global_lock, NULL);
   pthread_mutex_init(&tasklet_lock, NULL);
   pthread_mutex_init(&atomic_lock, NULL);
+  tvh_cond_init(&mtimer_cond);
   pthread_cond_init(&gtimer_cond, NULL);
-  pthread_cond_init(&tasklet_cond, NULL);
+  tvh_cond_init(&tasklet_cond);
   TAILQ_INIT(&tasklets);
 
   /* Defaults */
@@ -615,7 +760,8 @@ main(int argc, char **argv)
   tvheadend_webroot         = NULL;
   tvheadend_htsp_port       = 9982;
   tvheadend_htsp_port_extra = 0;
-  time(&dispatch_clock);
+  __mdispatch_clock = getmonoclock();
+  __gdispatch_clock = time(NULL);
 
   /* Command line options */
   int         opt_help         = 0,
@@ -643,7 +789,8 @@ main(int argc, char **argv)
               opt_dbus         = 0,
               opt_dbus_session = 0,
               opt_nobackup     = 0,
-              opt_nobat        = 0;
+              opt_nobat        = 0,
+              opt_subsystems   = 0;
   const char *opt_config       = NULL,
              *opt_user         = NULL,
              *opt_group        = NULL,
@@ -656,9 +803,12 @@ main(int argc, char **argv)
 #endif
              *opt_bindaddr     = NULL,
              *opt_subscribe    = NULL,
-             *opt_user_agent   = NULL;
-  str_list_t  opt_satip_xml    = { .max = 10, .num = 0, .str = calloc(10, sizeof(char*)) };
-  str_list_t  opt_tsfile       = { .max = 10, .num = 0, .str = calloc(10, sizeof(char*)) };
+             *opt_user_agent   = NULL,
+             *opt_satip_bindaddr = NULL;
+  static char *__opt_satip_xml[10];
+  str_list_t  opt_satip_xml    = { .max = 10, .num = 0, .str = __opt_satip_xml };
+  static char *__opt_satip_tsfile[10];
+  str_list_t  opt_tsfile       = { .max = 10, .num = 0, .str = __opt_satip_tsfile };
   cmdline_opt_t cmdline_opts[] = {
     {   0, NULL,        N_("Generic options"),         OPT_BOOL, NULL         },
     { 'h', "help",      N_("Show this page"),          OPT_BOOL, &opt_help    },
@@ -684,10 +834,12 @@ main(int argc, char **argv)
       OPT_BOOL, &opt_dbus_session },
 #endif
 #if ENABLE_LINUXDVB
-    { 'a', "adapters",  N_("Only use specified DVB adapters (comma separated, -1 = none)"),
+    { 'a', "adapters",  N_("Only use specified DVB adapters (comma-separated, -1 = none)"),
       OPT_STR, &opt_dvb_adapters },
 #endif
 #if ENABLE_SATIP_SERVER
+    {   0, "satip_bindaddr", N_("Specify bind address for SAT>IP server"),
+      OPT_STR, &opt_satip_bindaddr },
     {   0, "satip_rtsp", N_("SAT>IP RTSP port number for server\n"
                             "(default: -1 = disable, 0 = webconfig, standard port is 554)"),
       OPT_INT, &opt_satip_rtsp },
@@ -724,6 +876,7 @@ main(int argc, char **argv)
 #if ENABLE_TRACE
     {   0, "trace",     N_("Enable trace subsystems"), OPT_STR,  &opt_log_trace },
 #endif
+    {   0, "subsystems",N_("List subsystems"),         OPT_BOOL, &opt_subsystems },
     {   0, "fileline",  N_("Add file and line numbers to debug"), OPT_BOOL, &opt_fileline },
     {   0, "threadid",  N_("Add the thread ID to debug"), OPT_BOOL, &opt_threadid },
 #if ENABLE_LIBAV
@@ -796,6 +949,8 @@ main(int argc, char **argv)
       show_usage(argv[0], cmdline_opts, ARRAY_SIZE(cmdline_opts), NULL);
     if (opt_version)
       show_version(argv[0]);
+    if (opt_subsystems)
+      show_subsystems(argv[0]);
   }
 
   /* Additional cmdline processing */
@@ -881,7 +1036,7 @@ main(int argc, char **argv)
   tvhlog_init(log_level, log_options, opt_logpath);
   tvhlog_set_debug(log_debug);
   tvhlog_set_trace(log_trace);
-  tvhinfo("main", "Log started");
+  tvhinfo(LS_MAIN, "Log started");
  
   signal(SIGPIPE, handle_sigpipe); // will be redundant later
   signal(SIGILL, handle_sigill);   // see handler..
@@ -909,7 +1064,7 @@ main(int argc, char **argv)
           for (i = 0; i < gnum; i++)
             snprintf(buf + strlen(buf), sizeof(buf) - 1 - strlen(buf),
                      ",%d", glist[i]);
-          tvhlog(LOG_ALERT, "START",
+          tvhlog(LOG_ALERT, LS_START,
                  "setgroups(%s) failed, do you have permission?", buf+1);
           return 1;
         }
@@ -923,22 +1078,23 @@ main(int argc, char **argv)
   }
 
   uuid_init();
+  idnode_boot();
   config_boot(opt_config, gid, uid);
   tcp_server_preinit(opt_ipv6);
   http_server_init(opt_bindaddr);    // bind to ports only
   htsp_init(opt_bindaddr);	     // bind to ports only
-  satip_server_init(opt_satip_rtsp); // bind to ports only
+  satip_server_init(opt_satip_bindaddr, opt_satip_rtsp); // bind to ports only
 
   if (opt_fork)
     pidfile = tvh_fopen(opt_pidpath, "w+");
 
   if (gid != -1 && (getgid() != gid) && setgid(gid)) {
-    tvhlog(LOG_ALERT, "START",
+    tvhlog(LOG_ALERT, LS_START,
            "setgid(%d) failed, do you have permission?", gid);
     return 1;
   }
   if (uid != -1 && (getuid() != uid) && setuid(uid)) {
-    tvhlog(LOG_ALERT, "START",
+    tvhlog(LOG_ALERT, LS_START,
            "setuid(%d) failed, do you have permission?", uid);
     return 1;
   }
@@ -957,17 +1113,17 @@ main(int argc, char **argv)
     if (opt_dump) {
 #ifdef PLATFORM_LINUX
       if (chdir("/tmp"))
-        tvhwarn("START", "failed to change cwd to /tmp");
+        tvhwarn(LS_START, "failed to change cwd to /tmp");
       prctl(PR_SET_DUMPABLE, 1);
 #else
-      tvhwarn("START", "Coredumps not implemented on your platform");
+      tvhwarn(LS_START, "Coredumps not implemented on your platform");
 #endif
     }
 
     umask(0);
   }
 
-  tvheadend_running = 1;
+  atomic_set(&tvheadend_running, 1);
 
   /* Start log thread (must be done post fork) */
   tvhlog_start();
@@ -980,7 +1136,8 @@ main(int argc, char **argv)
   
   /* Initialise clock */
   pthread_mutex_lock(&global_lock);
-  time(&dispatch_clock);
+  __mdispatch_clock = getmonoclock();
+  __gdispatch_clock = time(NULL);
 
   /* Signal handling */
   sigfillset(&set);
@@ -998,10 +1155,21 @@ main(int argc, char **argv)
   RAND_seed(&randseed, sizeof(randseed));
 
   /* Initialise configuration */
-  notify_init();
-  idnode_init();
-  spawn_init();
-  config_init(opt_nobackup == 0);
+  tvhftrace(LS_MAIN, notify_init);
+  tvhftrace(LS_MAIN, spawn_init);
+  tvhftrace(LS_MAIN, idnode_init);
+  tvhftrace(LS_MAIN, config_init, opt_nobackup == 0);
+
+  /* Memoryinfo */
+  idclass_register(&memoryinfo_class);
+  memoryinfo_register(&tasklet_memoryinfo);
+#if ENABLE_SLOW_MEMORYINFO
+  memoryinfo_register(&htsmsg_memoryinfo);
+  memoryinfo_register(&htsmsg_field_memoryinfo);
+#endif
+  memoryinfo_register(&pkt_memoryinfo);
+  memoryinfo_register(&pktbuf_memoryinfo);
+  memoryinfo_register(&pktref_memoryinfo);
 
   /**
    * Initialize subsystems
@@ -1009,80 +1177,58 @@ main(int argc, char **argv)
 
   epg_in_load = 1;
 
+  tvhthread_create(&mtimer_tick_tid, NULL, mtimer_tick_thread, NULL, "mtick");
   tvhthread_create(&tasklet_tid, NULL, tasklet_thread, NULL, "tasklet");
 
-  dbus_server_init(opt_dbus, opt_dbus_session);
-
-  intlconv_init();
-  
-  api_init();
-
-  fsmonitor_init();
-
-  libav_init();
-
-  tvhtime_init();
-
-  profile_init();
-
-  imagecache_init();
-
-  http_client_init(opt_user_agent);
-  esfilter_init();
-
-  bouquet_init();
-
-  service_init();
-
-  dvb_init();
-
+  tvhftrace(LS_MAIN, streaming_init);
+  tvhftrace(LS_MAIN, tvh_hardware_init);
+  tvhftrace(LS_MAIN, dbus_server_init, opt_dbus, opt_dbus_session);
+  tvhftrace(LS_MAIN, intlconv_init);
+  tvhftrace(LS_MAIN, api_init);
+  tvhftrace(LS_MAIN, fsmonitor_init);
+  tvhftrace(LS_MAIN, libav_init);
+  tvhftrace(LS_MAIN, tvhtime_init);
+  tvhftrace(LS_MAIN, profile_init);
+  tvhftrace(LS_MAIN, imagecache_init);
+  tvhftrace(LS_MAIN, http_client_init, opt_user_agent);
+  tvhftrace(LS_MAIN, esfilter_init);
+  tvhftrace(LS_MAIN, bouquet_init);
+  tvhftrace(LS_MAIN, service_init);
+  tvhftrace(LS_MAIN, dvb_init);
 #if ENABLE_MPEGTS
-  mpegts_init(adapter_mask, opt_nosatip, &opt_satip_xml,
-              &opt_tsfile, opt_tsfile_tuner);
+  tvhftrace(LS_MAIN, mpegts_init, adapter_mask, opt_nosatip, &opt_satip_xml,
+            &opt_tsfile, opt_tsfile_tuner);
 #endif
-
-  channel_init();
-
-  bouquet_service_resolve();
-
-  subscription_init();
-
-  dvr_config_init();
-
-  access_init(opt_firstrun, opt_noacl);
-
+  tvhftrace(LS_MAIN, channel_init);
+  tvhftrace(LS_MAIN, bouquet_service_resolve);
+  tvhftrace(LS_MAIN, subscription_init);
+  tvhftrace(LS_MAIN, dvr_config_init);
+  tvhftrace(LS_MAIN, access_init, opt_firstrun, opt_noacl);
 #if ENABLE_TIMESHIFT
-  timeshift_init();
+  tvhftrace(LS_MAIN, timeshift_init);
 #endif
-
-  tcp_server_init();
-  webui_init(opt_xspf);
+  tvhftrace(LS_MAIN, tcp_server_init);
+  tvhftrace(LS_MAIN, webui_init, opt_xspf);
 #if ENABLE_UPNP
-  upnp_server_init(opt_bindaddr);
+  tvhftrace(LS_MAIN, upnp_server_init, opt_bindaddr);
 #endif
-
-  service_mapper_init();
-
-  descrambler_init();
-
-  epggrab_init();
-  epg_init();
-
-  dvr_init();
-
-  dbus_server_start();
-
-  http_server_register();
-  satip_server_register();
-  htsp_register();
+  tvhftrace(LS_MAIN, service_mapper_init);
+  tvhftrace(LS_MAIN, descrambler_init);
+  tvhftrace(LS_MAIN, epggrab_init);
+  tvhftrace(LS_MAIN, epg_init);
+  tvhftrace(LS_MAIN, dvr_init);
+  tvhftrace(LS_MAIN, dbus_server_start);
+  tvhftrace(LS_MAIN, http_server_register);
+  tvhftrace(LS_MAIN, satip_server_register);
+  tvhftrace(LS_MAIN, htsp_register);
 
   if(opt_subscribe != NULL)
     subscription_dummy_join(opt_subscribe, 1);
 
-  avahi_init();
-  bonjour_init();
+  tvhftrace(LS_MAIN, avahi_init);
+  tvhftrace(LS_MAIN, bonjour_init);
 
-  epg_updated(); // cleanup now all prev ref's should have been created
+  tvhftrace(LS_MAIN, epg_updated); // cleanup now all prev ref's should have been created
   epg_in_load = 0;
 
   pthread_mutex_unlock(&global_lock);
@@ -1100,7 +1246,7 @@ main(int argc, char **argv)
 
   pthread_sigmask(SIG_UNBLOCK, &set, NULL);
 
-  tvhlog(LOG_NOTICE, "START", "HTS Tvheadend version %s started, "
+  tvhlog(LOG_NOTICE, LS_START, "HTS Tvheadend version %s started, "
          "running as PID:%d UID:%d GID:%d, CWD:%s CNF:%s",
          tvheadend_version,
          getpid(), getuid(), getgid(), getcwd(buf, sizeof(buf)),
@@ -1109,82 +1255,86 @@ main(int argc, char **argv)
   if(opt_abort)
     abort();
 
+  tvhthread_create(&mtimer_tid, NULL, mtimer_thread, NULL, "mtimer");
   mainloop();
+  pthread_mutex_lock(&global_lock);
+  tvh_cond_signal(&mtimer_cond, 0);
+  pthread_mutex_unlock(&global_lock);
+  pthread_join(mtimer_tid, NULL);
 
 #if ENABLE_DBUS_1
-  tvhftrace("main", dbus_server_done);
+  tvhftrace(LS_MAIN, dbus_server_done);
 #endif
 #if ENABLE_UPNP
-  tvhftrace("main", upnp_server_done);
+  tvhftrace(LS_MAIN, upnp_server_done);
 #endif
-  tvhftrace("main", satip_server_done);
-  tvhftrace("main", htsp_done);
-  tvhftrace("main", http_server_done);
-  tvhftrace("main", webui_done);
-  tvhftrace("main", fsmonitor_done);
-  tvhftrace("main", http_client_done);
-  tvhftrace("main", tcp_server_done);
+  tvhftrace(LS_MAIN, satip_server_done);
+  tvhftrace(LS_MAIN, htsp_done);
+  tvhftrace(LS_MAIN, http_server_done);
+  tvhftrace(LS_MAIN, webui_done);
+  tvhftrace(LS_MAIN, fsmonitor_done);
+  tvhftrace(LS_MAIN, http_client_done);
+  tvhftrace(LS_MAIN, tcp_server_done);
 
   // Note: the locking is obviously a bit redundant, but without
   //       we need to disable the gtimer_arm call in epg_save()
   pthread_mutex_lock(&global_lock);
-  tvhftrace("main", epg_save);
+  tvhftrace(LS_MAIN, epg_save);
 
 #if ENABLE_TIMESHIFT
-  tvhftrace("main", timeshift_term);
+  tvhftrace(LS_MAIN, timeshift_term);
 #endif
   pthread_mutex_unlock(&global_lock);
 
-  tvhftrace("main", epggrab_done);
+  tvhftrace(LS_MAIN, epggrab_done);
 #if ENABLE_MPEGTS
-  tvhftrace("main", mpegts_done);
+  tvhftrace(LS_MAIN, mpegts_done);
 #endif
-  tvhftrace("main", descrambler_done);
-  tvhftrace("main", service_mapper_done);
-  tvhftrace("main", service_done);
-  tvhftrace("main", channel_done);
-  tvhftrace("main", bouquet_done);
-  tvhftrace("main", dvr_done);
-  tvhftrace("main", subscription_done);
-  tvhftrace("main", access_done);
-  tvhftrace("main", epg_done);
-  tvhftrace("main", avahi_done);
-  tvhftrace("main", bonjour_done);
-  tvhftrace("main", imagecache_done);
-  tvhftrace("main", lang_code_done);
-  tvhftrace("main", api_done);
+  tvhftrace(LS_MAIN, dvr_done);
+  tvhftrace(LS_MAIN, descrambler_done);
+  tvhftrace(LS_MAIN, service_mapper_done);
+  tvhftrace(LS_MAIN, service_done);
+  tvhftrace(LS_MAIN, channel_done);
+  tvhftrace(LS_MAIN, bouquet_done);
+  tvhftrace(LS_MAIN, subscription_done);
+  tvhftrace(LS_MAIN, access_done);
+  tvhftrace(LS_MAIN, epg_done);
+  tvhftrace(LS_MAIN, avahi_done);
+  tvhftrace(LS_MAIN, bonjour_done);
+  tvhftrace(LS_MAIN, imagecache_done);
+  tvhftrace(LS_MAIN, lang_code_done);
+  tvhftrace(LS_MAIN, api_done);
 
-  tvhtrace("main", "tasklet enter");
-  pthread_cond_signal(&tasklet_cond);
+  tvhtrace(LS_MAIN, "tasklet enter");
+  tvh_cond_signal(&tasklet_cond, 0);
   pthread_join(tasklet_tid, NULL);
-  tvhtrace("main", "tasklet thread end");
+  tvhtrace(LS_MAIN, "tasklet thread end");
   tasklet_flush();
-  tvhtrace("main", "tasklet leave");
+  tvhtrace(LS_MAIN, "tasklet leave");
+  tvhtrace(LS_MAIN, "mtimer tick thread join enter");
+  pthread_join(mtimer_tick_tid, NULL);
+  tvhtrace(LS_MAIN, "mtimer tick thread join leave");
 
-  tvhftrace("main", hts_settings_done);
-  tvhftrace("main", dvb_done);
-  tvhftrace("main", lang_str_done);
-  tvhftrace("main", esfilter_done);
-  tvhftrace("main", profile_done);
-  tvhftrace("main", intlconv_done);
-  tvhftrace("main", urlparse_done);
-  tvhftrace("main", idnode_done);
-  tvhftrace("main", notify_done);
-  tvhftrace("main", spawn_done);
+  tvhftrace(LS_MAIN, dvb_done);
+  tvhftrace(LS_MAIN, lang_str_done);
+  tvhftrace(LS_MAIN, esfilter_done);
+  tvhftrace(LS_MAIN, profile_done);
+  tvhftrace(LS_MAIN, intlconv_done);
+  tvhftrace(LS_MAIN, urlparse_done);
+  tvhftrace(LS_MAIN, streaming_done);
+  tvhftrace(LS_MAIN, idnode_done);
+  tvhftrace(LS_MAIN, notify_done);
+  tvhftrace(LS_MAIN, spawn_done);
 
-  tvhlog(LOG_NOTICE, "STOP", "Exiting HTS Tvheadend");
+  tvhlog(LOG_NOTICE, LS_STOP, "Exiting HTS Tvheadend");
   tvhlog_end();
 
-  tvhftrace("main", config_done);
+  tvhftrace(LS_MAIN, config_done);
+  tvhftrace(LS_MAIN, hts_settings_done);
 
   if(opt_fork)
     unlink(opt_pidpath);
     
-#if ENABLE_TSFILE
-  free(opt_tsfile.str);
-#endif
-  free(opt_satip_xml.str);
-
   /* OpenSSL - welcome to the "cleanup" hell */
   ENGINE_cleanup();
   RAND_cleanup();
@@ -1256,5 +1406,15 @@ htsmsg_t *tvheadend_capabilities_list(int check)
       htsmsg_add_str(r, NULL, tc->name);
     tc++;
   }
+  if (config.caclient_ui)
+    htsmsg_add_str(r, NULL, "caclient_advanced");
   return r;
+}
+
+/**
+ *
+ */
+void time_t_out_of_range_notify(int64_t val)
+{
+  tvherror(LS_MAIN, "time value out of range (%"PRId64") of time_t", val);
 }

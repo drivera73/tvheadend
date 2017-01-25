@@ -144,7 +144,7 @@ urlparse_done( void )
 // TODO: does not support ipv6
 #define UC "[a-z0-9_\\.!£$%^&-]"
 #define PC UC
-#define HC "[a-z0-9\\.-]"
+#define HC "[a-z0-9_\\.-]"
 #define URL_RE "^([A-Za-z]+)://(("UC"+)(:("PC"+))?@|@)?("HC"+)(:([0-9]+))?(/[^\\?]*)?(.([^#]*))?(#(.*))?"
 
 static regex_t *urlparse_exp = NULL;
@@ -164,7 +164,7 @@ urlparse ( const char *str, url_t *url )
   if (!urlparse_exp) {
     urlparse_exp = calloc(1, sizeof(regex_t));
     if (regcomp(urlparse_exp, URL_RE, REG_ICASE | REG_EXTENDED)) {
-      tvherror("url", "failed to compile regexp");
+      tvherror(LS_URL, "failed to compile regexp");
       exit(1);
     }
   }

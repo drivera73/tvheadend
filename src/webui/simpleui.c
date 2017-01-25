@@ -337,8 +337,8 @@ page_einfo(http_connection_t *hc, const char *remain, void *opaque)
   if((http_arg_get(&hc->hc_req_args, "rec")) != NULL) {
     de = dvr_entry_create_by_event(1, NULL, e, 0, 0, hc->hc_username ?: NULL,
                                    hc->hc_representative ?: NULL, NULL,
-                                   DVR_PRIO_NORMAL, DVR_RET_DVRCONFIG,
-				   DVR_RET_DVRCONFIG, "simpleui");
+                                   DVR_PRIO_NORMAL, DVR_RET_REM_DVRCONFIG,
+                                   DVR_RET_REM_DVRCONFIG, "simpleui");
   } else if(de != NULL && (http_arg_get(&hc->hc_req_args, "cancel")) != NULL) {
     de = dvr_entry_cancel(de, 0);
   }
@@ -508,7 +508,7 @@ page_status(http_connection_t *hc,
 #ifdef ENABLE_GETLOADAVG
   loads = getloadavg (avg, 3); 
   if (loads == -1) {
-        tvhlog(LOG_DEBUG, "webui",  "Error getting load average from getloadavg()");
+        tvhdebug(LS_WEBUI,  "Error getting load average from getloadavg()");
         loads = 0;
         /* should we return an error or a 0 on error */
         htsbuf_qprintf(hq, "<systemload>0</systemload>\n");

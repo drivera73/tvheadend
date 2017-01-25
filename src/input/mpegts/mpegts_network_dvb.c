@@ -24,6 +24,7 @@
 #include "mpegts_dvb.h"
 #include "linuxdvb/linuxdvb_private.h"
 #include "dvb_charset.h"
+#include "config.h"
 #include "scanfile.h"
 
 #include <sys/types.h>
@@ -79,26 +80,27 @@ dvb_network_scanfile_set ( dvb_network_t *ln, const char *id )
 
   /* Create */
   LIST_FOREACH(dmc, &sfn->sfn_muxes, dmc_link) {
-    if (!(mm = dvb_network_find_mux(ln, dmc, MPEGTS_ONID_NONE, MPEGTS_TSID_NONE))) {
+    if (!(mm = dvb_network_find_mux(ln, dmc, MPEGTS_ONID_NONE, MPEGTS_TSID_NONE, 0, 0))) {
       mm = dvb_mux_create0(ln, MPEGTS_ONID_NONE, MPEGTS_TSID_NONE,
                            dmc, NULL, NULL);
       if (mm)
-        mm->mm_config_save((mpegts_mux_t *)mm);
+        idnode_changed(&mm->mm_id);
       if (tvhtrace_enabled()) {
         char buf[128];
         dvb_mux_conf_str(dmc, buf, sizeof(buf));
-        tvhtrace("scanfile", "mux %p %s added to network %s", mm, buf, ln->mn_network_name);
+        tvhtrace(LS_SCANFILE, "mux %p %s added to network %s", mm, buf, ln->mn_network_name);
       }
     } else {
       if (tvhtrace_enabled()) {
         char buf[128];
         dvb_mux_conf_str(dmc, buf, sizeof(buf));
-        tvhtrace("scanfile", "mux %p skipped %s in network %s", mm, buf, ln->mn_network_name);
+        tvhtrace(LS_SCANFILE, "mux %p skipped %s in network %s", mm, buf, ln->mn_network_name);
         dvb_mux_conf_str(&((dvb_mux_t *)mm)->lm_tuning, buf, sizeof(buf));
-        tvhtrace("scanfile", "mux %p exists %s in network %s", mm, buf, ln->mn_network_name);
+        tvhtrace(LS_SCANFILE, "mux %p exists %s in network %s", mm, buf, ln->mn_network_name);
       }
     }
   }
+  scanfile_clean(sfn);
   return;
 }
 
@@ -220,6 +222,8 @@ dvb_network_class_orbital_pos_list ( void *o, const char *lang )
   return m;
 }
 
+PROP_DOC(predefinedmuxlist)
+
 const idclass_t dvb_network_class =
 {
   .ic_super      = &mpegts_network_class,
@@ -235,7 +239,7 @@ const idclass_t dvb_network_dvbt_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_dvbt",
-  .ic_caption    = N_("DVB-T network"),
+  .ic_caption    = N_("DVB-T Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -244,6 +248,7 @@ const idclass_t dvb_network_dvbt_class =
       .desc     = N_("Use a pre-defined list of DVB-T muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_dvbt,
@@ -257,7 +262,7 @@ const idclass_t dvb_network_dvbc_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_dvbc",
-  .ic_caption    = N_("DVB-C network"),
+  .ic_caption    = N_("DVB-C Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -266,6 +271,7 @@ const idclass_t dvb_network_dvbc_class =
       .desc     = N_("Use a pre-defined list of DVB-C muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_dvbc,
@@ -279,7 +285,7 @@ const idclass_t dvb_network_dvbs_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_dvbs",
-  .ic_caption    = N_("DVB-S network"),
+  .ic_caption    = N_("DVB-S Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -288,6 +294,7 @@ const idclass_t dvb_network_dvbs_class =
       .desc     = N_("Use a pre-defined list of DVB-S/S2 muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_dvbs,
@@ -297,7 +304,7 @@ const idclass_t dvb_network_dvbs_class =
       .type     = PT_STR,
       .id       = "orbital_pos",
       .name     = N_("Orbital position"),
-      .desc     = N_("Select the orbital position of the satellite "
+      .desc     = N_("The orbital position of the satellite "
                      "your dish is pointing at."),
       .set      = dvb_network_class_orbital_pos_set,
       .get      = dvb_network_class_orbital_pos_get,
@@ -311,7 +318,7 @@ const idclass_t dvb_network_atsc_t_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_atsc_t",
-  .ic_caption    = N_("ATSC-T network"),
+  .ic_caption    = N_("ATSC-T Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -320,6 +327,7 @@ const idclass_t dvb_network_atsc_t_class =
       .desc     = N_("Use a pre-defined list of ATSC-T muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_atsc_t,
@@ -333,7 +341,7 @@ const idclass_t dvb_network_atsc_c_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_atsc_c",
-  .ic_caption    = N_("ATSC-C network"),
+  .ic_caption    = N_("ATSC-C Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -342,6 +350,7 @@ const idclass_t dvb_network_atsc_c_class =
       .desc     = N_("Use a pre-defined list of ATSC-C muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_atsc_c,
@@ -355,7 +364,7 @@ const idclass_t dvb_network_isdb_t_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_isdb_t",
-  .ic_caption    = N_("ISDB-T network"),
+  .ic_caption    = N_("ISDB-T Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -364,6 +373,7 @@ const idclass_t dvb_network_isdb_t_class =
       .desc     = N_("Use a pre-defined list of ISDB-T muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_isdb_t,
@@ -377,7 +387,7 @@ const idclass_t dvb_network_isdb_c_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_isdb_c",
-  .ic_caption    = N_("ISDB-C network"),
+  .ic_caption    = N_("ISDB-C Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -386,6 +396,7 @@ const idclass_t dvb_network_isdb_c_class =
       .desc     = N_("Use a pre-defined list of ISDB-C muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_isdb_c,
@@ -399,7 +410,7 @@ const idclass_t dvb_network_isdb_s_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_isdb_s",
-  .ic_caption    = N_("ISDB-S network"),
+  .ic_caption    = N_("ISDB-S Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -408,6 +419,7 @@ const idclass_t dvb_network_isdb_s_class =
       .desc     = N_("Use a pre-defined list of ISDB-S muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_isdb_s,
@@ -421,7 +433,7 @@ const idclass_t dvb_network_dab_class =
 {
   .ic_super      = &dvb_network_class,
   .ic_class      = "dvb_network_dab",
-  .ic_caption    = N_("DAB network"),
+  .ic_caption    = N_("DAB Network"),
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_STR,
@@ -430,6 +442,7 @@ const idclass_t dvb_network_dab_class =
       .desc     = N_("Use a pre-defined list of DAB muxes. "
                      "Note: these lists can sometimes be outdated and "
                      "may cause scanning to take longer than usual."),
+      .doc      = prop_doc_predefinedmuxlist,
       .set      = dvb_network_class_scanfile_set,
       .get      = dvb_network_class_scanfile_get,
       .list     = dvb_network_class_scanfile_list_dab,
@@ -486,12 +499,15 @@ dvb_network_check_orbital_pos ( int satpos1, int satpos2 )
 
 dvb_mux_t *
 dvb_network_find_mux
-  ( dvb_network_t *ln, dvb_mux_conf_t *dmc, uint16_t onid, uint16_t tsid )
+  ( dvb_network_t *ln, dvb_mux_conf_t *dmc, uint16_t onid, uint16_t tsid, int check, int approx_match )
 {
   int deltaf, deltar;
   mpegts_mux_t *mm, *mm_alt = NULL;
 
   LIST_FOREACH(mm, &ln->mn_muxes, mm_network_link) {
+
+    if (check && mm->mm_enabled != MM_ENABLE) continue;
+
     deltaf = 2000; // 2K/MHz
     deltar = 1000;
     dvb_mux_t *lm = (dvb_mux_t*)mm;
@@ -500,16 +516,22 @@ dvb_network_find_mux
     if (lm->lm_tuning.dmc_fe_type != dmc->dmc_fe_type) continue;
 
     /* Also, the system type should match (DVB-S/DVB-S2) */
-    if (lm->lm_tuning.dmc_fe_delsys != dmc->dmc_fe_delsys) continue;
+    if (!approx_match && (lm->lm_tuning.dmc_fe_delsys != dmc->dmc_fe_delsys)) continue;
 
     /* if ONID/TSID are a perfect match (and this is DVB-S, allow greater deltaf) */
     if (lm->lm_tuning.dmc_fe_type == DVB_TYPE_S) {
       deltar = 10000;
-      if (onid != MPEGTS_ONID_NONE && tsid != MPEGTS_TSID_NONE)
+      if (onid != MPEGTS_ONID_NONE && tsid != MPEGTS_TSID_NONE) {
         deltaf = 16000; // This is slightly crazy, but I have seen 10MHz changes in freq
                         // and remember the ONID and TSID must agree
-      else
+      } else {
+        /* the freq. changes for lower symbol rates might be smaller */
         deltaf = 4000;
+        if (dmc->u.dmc_fe_qpsk.symbol_rate < 5000000)
+          deltaf = 1900;
+        if (dmc->u.dmc_fe_qpsk.symbol_rate < 10000000)
+          deltaf = 2900;
+      }
     }
 
     /* Reject if not same frequency (some tolerance due to changes and diff in NIT) */
@@ -518,11 +540,19 @@ dvb_network_find_mux
     /* Reject if not same symbol rate (some tolerance due to changes and diff in NIT) */
     if (dvb_network_check_symbol_rate(lm, dmc, deltar)) continue;
 
-    /* DVB-S extra checks */
-    if (lm->lm_tuning.dmc_fe_type == DVB_TYPE_S) {
+    /* Reject if not same polarisation */
+    if (lm->lm_tuning.u.dmc_fe_qpsk.polarisation != dmc->u.dmc_fe_qpsk.polarisation) continue;
 
-      /* Same polarisation */
-      if (lm->lm_tuning.u.dmc_fe_qpsk.polarisation != dmc->u.dmc_fe_qpsk.polarisation) continue;
+    /* DVB-S extra checks */
+    if (!approx_match && (lm->lm_tuning.dmc_fe_type == DVB_TYPE_S)) {
+
+      /* Same modulation */
+      if (!dvb_modulation_is_none_or_auto(lm->lm_tuning.dmc_fe_modulation) &&
+          !dvb_modulation_is_none_or_auto(dmc->dmc_fe_modulation) &&
+          lm->lm_tuning.dmc_fe_modulation != dmc->dmc_fe_modulation) continue;
+
+      /* Same FEC */
+      if (lm->lm_tuning.u.dmc_fe_qpsk.fec_inner != dmc->u.dmc_fe_qpsk.fec_inner) continue;
 
       /* Same orbital position */
       if (dvb_network_check_orbital_pos(lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos,
@@ -549,16 +579,16 @@ dvb_network_find_mux
   return (dvb_mux_t *)mm;
 }
 
-static void
-dvb_network_config_save ( mpegts_network_t *mn )
+static htsmsg_t *
+dvb_network_config_save ( mpegts_network_t *mn, char *filename, size_t fsize )
 {
   htsmsg_t *c = htsmsg_create_map();
   char ubuf[UUID_HEX_SIZE];
   idnode_save(&mn->mn_id, c);
   htsmsg_add_str(c, "class", mn->mn_id.in_class->ic_class);
-  hts_settings_save(c, "input/dvb/networks/%s/config",
-                    idnode_uuid_as_str(&mn->mn_id, ubuf));
-  htsmsg_destroy(c);
+  snprintf(filename, fsize, "input/dvb/networks/%s/config",
+           idnode_uuid_as_str(&mn->mn_id, ubuf));
+  return c;
 }
 
 const idclass_t *
@@ -634,8 +664,8 @@ dvb_network_create_mux
   }
 
   ln = (dvb_network_t*)mn;
-  mm = dvb_network_find_mux(ln, dmc, onid, tsid);
-  if (!mm && (ln->mn_autodiscovery || force)) {
+  mm = dvb_network_find_mux(ln, dmc, onid, tsid, 0, 0);
+  if (!mm && (ln->mn_autodiscovery != MN_DISCOVERY_DISABLE || force)) {
     cls = dvb_network_mux_class((mpegts_network_t *)ln);
     save |= cls == &dvb_mux_dvbt_class && dmc->dmc_fe_type == DVB_TYPE_T;
     save |= cls == &dvb_mux_dvbc_class && dmc->dmc_fe_type == DVB_TYPE_C;
@@ -653,46 +683,56 @@ dvb_network_create_mux
       if (tvhtrace_enabled()) {
         char buf[128];
         dvb_mux_conf_str(&((dvb_mux_t *)mm)->lm_tuning, buf, sizeof(buf));
-        tvhtrace("mpegts", "mux %p %s onid %i tsid %i added to network %s (autodiscovery)",
+        tvhtrace(LS_MPEGTS, "mux %p %s onid %i tsid %i added to network %s (autodiscovery)",
                  mm, buf, onid, tsid, mm->mm_network->mn_network_name);
       }
     }
   } else if (mm) {
+    char buf[128];
+    dvb_mux_conf_t tuning_new, tuning_old;
     dvb_mux_t *lm = (dvb_mux_t*)mm;
+    int change = (ln->mn_autodiscovery == MN_DISCOVERY_CHANGE) || force;
     /* the nit tables may be inconsistent (like rolloff ping-pong) */
     /* accept information only from one origin mux */
-    if (mm->mm_dmc_origin_expire > dispatch_clock && mm->mm_dmc_origin && mm->mm_dmc_origin != origin)
+    if (mm->mm_dmc_origin_expire > mclk() && mm->mm_dmc_origin && mm->mm_dmc_origin != origin)
       goto noop;
     #define COMPARE(x, cbit) ({ \
       int xr = dmc->x != lm->lm_tuning.x; \
       if (xr) { \
-        tvhtrace("mpegts", "create mux dmc->" #x " (%li) != lm->lm_tuning." #x \
-                 " (%li)", (long)dmc->x, (long)lm->lm_tuning.x); \
-        lm->lm_tuning.x = dmc->x; \
+        tvhtrace(LS_MPEGTS, "create mux dmc->" #x " (%li) != lm->lm_tuning." #x \
+                 " (%li)", (long)dmc->x, (long)tuning_new.x); \
+        tuning_new.x = dmc->x; \
       } xr ? cbit : 0; })
     #define COMPAREN(x, cbit) ({ \
-      int xr = dmc->x != 0 && dmc->x != 1 && dmc->x != lm->lm_tuning.x; \
+      int xr = dmc->x != 0 && dmc->x != 1 && dmc->x != tuning_new.x; \
       if (xr) { \
-        tvhtrace("mpegts", "create mux dmc->" #x " (%li) != lm->lm_tuning." #x \
-                 " (%li)", (long)dmc->x, (long)lm->lm_tuning.x); \
-        lm->lm_tuning.x = dmc->x; \
+        tvhtrace(LS_MPEGTS, "create mux dmc->" #x " (%li) != lm->lm_tuning." #x \
+                 " (%li)", (long)dmc->x, (long)tuning_new.x); \
+        tuning_new.x = dmc->x; \
       } xr ? cbit : 0; })
-    dvb_mux_conf_t tuning_old;
-    char buf[128];
-    tuning_old = lm->lm_tuning;
+    #define COMPAREN0(x, cbit) ({ \
+      int xr = dmc->x != 1 && dmc->x != tuning_new.x; \
+      if (xr) { \
+        tvhtrace(LS_MPEGTS, "create mux dmc->" #x " (%li) != lm->lm_tuning." #x \
+                 " (%li)", (long)dmc->x, (long)tuning_new.x); \
+        tuning_new.x = dmc->x; \
+      } xr ? cbit : 0; })
+    tuning_new = tuning_old = lm->lm_tuning;
     /* Always save the orbital position */
     if (dmc->dmc_fe_type == DVB_TYPE_S) {
-      if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos == INT_MAX ||
-          dvb_network_check_orbital_pos(lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos,
-                                        dmc->u.dmc_fe_qpsk.orbital_pos))
+      if (dmc->u.dmc_fe_qpsk.orbital_pos == INT_MAX ||
+          dvb_network_check_orbital_pos(tuning_new.u.dmc_fe_qpsk.orbital_pos,
+                                        dmc->u.dmc_fe_qpsk.orbital_pos)) {
         save |= COMPARE(u.dmc_fe_qpsk.orbital_pos, CBIT_ORBITAL_POS);
+        tuning_new.u.dmc_fe_qpsk.orbital_pos = dmc->u.dmc_fe_qpsk.orbital_pos;
+      }
     }
     /* Do not change anything else without autodiscovery flag */
     if (!ln->mn_autodiscovery)
       goto save;
     /* Handle big diffs that have been allowed through for DVB-S */
-    if (deltaU32(dmc->dmc_fe_freq, lm->lm_tuning.dmc_fe_freq) > 4000) {
-      lm->lm_tuning.dmc_fe_freq = dmc->dmc_fe_freq;
+    if (deltaU32(dmc->dmc_fe_freq, tuning_new.dmc_fe_freq) > 4000) {
+      tuning_new.dmc_fe_freq = dmc->dmc_fe_freq;
       save |= CBIT_FREQ;
     }
     save |= COMPAREN(dmc_fe_modulation, CBIT_MODULATION);
@@ -703,11 +743,11 @@ dvb_network_create_mux
     case DVB_TYPE_T:
       save |= COMPARE(dmc_fe_stream_id, CBIT_STREAM_ID);
       save |= COMPAREN(u.dmc_fe_ofdm.bandwidth, CBIT_BANDWIDTH);
+      save |= COMPAREN(u.dmc_fe_ofdm.hierarchy_information, CBIT_HIERARCHY);
       save |= COMPAREN(u.dmc_fe_ofdm.code_rate_HP, CBIT_RATE_HP);
-      save |= COMPAREN(u.dmc_fe_ofdm.code_rate_LP, CBIT_RATE_LP);
+      save |= COMPAREN0(u.dmc_fe_ofdm.code_rate_LP, CBIT_RATE_LP);
       save |= COMPAREN(u.dmc_fe_ofdm.transmission_mode, CBIT_TRANS_MODE);
       save |= COMPAREN(u.dmc_fe_ofdm.guard_interval, CBIT_GUARD);
-      save |= COMPAREN(u.dmc_fe_ofdm.hierarchy_information, CBIT_HIERARCHY);
       break;
     case DVB_TYPE_S:
       save |= COMPARE(u.dmc_fe_qpsk.polarisation, CBIT_POLARISATION);
@@ -732,16 +772,22 @@ dvb_network_create_mux
       char muxname[128];
       mpegts_mux_nice_name((mpegts_mux_t *)mm, muxname, sizeof(muxname));
       dvb_mux_conf_str(&tuning_old, buf, sizeof(buf));
-      tvhwarn("mpegts", "mux %s changed from %s (%08x)", muxname, buf, save);
-      dvb_mux_conf_str(&lm->lm_tuning, buf, sizeof(buf));
-      tvhwarn("mpegts", "mux %s changed to   %s (%08x)", muxname, buf, save);
+      tvhlog(change ? LOG_WARNING : LOG_NOTICE, LS_MPEGTS,
+             "mux %s%s %s (%08x)", muxname,
+             change ? " changed from" : " old params", buf, save);
+      dvb_mux_conf_str(&tuning_new, buf, sizeof(buf));
+      tvhlog(change ? LOG_WARNING : LOG_NOTICE, LS_MPEGTS,
+             "mux %s%s %s (%08x)", muxname,
+             change ? " changed to  " : " new params", buf, save);
+      if (!change) save = 0;
     }
+    if (save) lm->lm_tuning = tuning_new;
   }
 save:
   if (mm && save) {
     mm->mm_dmc_origin        = origin;
-    mm->mm_dmc_origin_expire = dispatch_clock + 3600 * 24; /* one day */
-    mm->mm_config_save((mpegts_mux_t *)mm);
+    mm->mm_dmc_origin_expire = mclk() + sec2mono(3600 * 24); /* one day */
+    idnode_changed(&mm->mm_id);
   }
 noop:
   return (mpegts_mux_t *)mm;
@@ -822,7 +868,7 @@ dvb_network_builder
   return (mpegts_network_t*)dvb_network_create0(NULL, idc, conf);
 }
 
-static  const idclass_t* dvb_network_classes[] = {
+static const idclass_t * dvb_network_classes[] = {
   &dvb_network_dvbt_class,
   &dvb_network_dvbc_class,
   &dvb_network_dvbs_class,
@@ -832,7 +878,21 @@ static  const idclass_t* dvb_network_classes[] = {
   &dvb_network_isdb_c_class,
   &dvb_network_isdb_s_class,
 #if 0 /* TODO: write DAB stream parser */
-  &dvb_network_dab_class
+  &dvb_network_dab_class,
+#endif
+};
+
+static const idclass_t * dvb_mux_classes[] = {
+  &dvb_mux_dvbt_class,
+  &dvb_mux_dvbc_class,
+  &dvb_mux_dvbs_class,
+  &dvb_mux_atsc_t_class,
+  &dvb_mux_atsc_c_class,
+  &dvb_mux_isdb_t_class,
+  &dvb_mux_isdb_c_class,
+  &dvb_mux_isdb_s_class,
+#if 0 /* TODO: write DAB stream parser */
+  &dvb_mux_dab_class,
 #endif
 };
 
@@ -843,11 +903,12 @@ void dvb_network_init ( void )
   const char *s;
   int i;
 
-  /* Load scan files */
-  scanfile_init();
-
   /* Load list of mux charset global overrides */
   dvb_charset_init();
+
+  /* Register mux classes */
+  for (i = 0; i < ARRAY_SIZE(dvb_mux_classes); i++)
+    idclass_register(dvb_mux_classes[i]);
 
   /* Register class builders */
   for (i = 0; i < ARRAY_SIZE(dvb_network_classes); i++)
@@ -962,7 +1023,7 @@ int dvb_network_get_orbital_pos(mpegts_network_t *mn)
     return INT_MAX;
   if (tvhtrace_enabled()) {
     if (!idnode_is_instance(&mn->mn_id, &dvb_network_dvbs_class)) {
-      tvhinfo("mpegts", "wrong dvb_network_get_orbital_pos() call");
+      tvhinfo(LS_MPEGTS, "wrong dvb_network_get_orbital_pos() call");
       return INT_MAX;
     }
   }

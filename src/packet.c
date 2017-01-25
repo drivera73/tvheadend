@@ -21,10 +21,15 @@
 #include "packet.h"
 #include "string.h"
 #include "atomic.h"
+#include "memoryinfo.h"
 
 #ifndef PKTBUF_DATA_ALIGN
 #define PKTBUF_DATA_ALIGN 64
 #endif
+
+memoryinfo_t pkt_memoryinfo = { .my_name = "Packets" };
+memoryinfo_t pktbuf_memoryinfo = { .my_name = "Packet buffers" };
+memoryinfo_t pktref_memoryinfo = { .my_name = "Packet references" };
 
 /*
  *
@@ -32,10 +37,13 @@
 static void
 pkt_destroy(th_pkt_t *pkt)
 {
-  pktbuf_ref_dec(pkt->pkt_payload);
-  pktbuf_ref_dec(pkt->pkt_meta);
+  if (pkt) {
+    pktbuf_ref_dec(pkt->pkt_payload);
+    pktbuf_ref_dec(pkt->pkt_meta);
 
-  free(pkt);
+    free(pkt);
+    memoryinfo_free(&pkt_memoryinfo, sizeof(*pkt));
+  }
 }
 
 
@@ -49,13 +57,62 @@ pkt_alloc(const void *data, size_t datalen, int64_t pts, int64_t dts)
   th_pkt_t *pkt;
 
   pkt = calloc(1, sizeof(th_pkt_t));
-  if(datalen)
-    pkt->pkt_payload = pktbuf_alloc(data, datalen);
-  pkt->pkt_dts = dts;
-  pkt->pkt_pts = pts;
-  pkt->pkt_refcount = 1;
+  if (pkt) {
+    if(datalen)
+      pkt->pkt_payload = pktbuf_alloc(data, datalen);
+    pkt->pkt_dts = dts;
+    pkt->pkt_pts = pts;
+    pkt->pkt_refcount = 1;
+    memoryinfo_alloc(&pkt_memoryinfo, sizeof(*pkt));
+  }
   return pkt;
 }
+
+
+/**
+ *
+ */
+th_pkt_t *
+pkt_copy_shallow(th_pkt_t *pkt)
+{
+  th_pkt_t *n = malloc(sizeof(th_pkt_t));
+
+  if (n) {
+    *n = *pkt;
+
+    n->pkt_refcount = 1;
+
+    pktbuf_ref_inc(n->pkt_meta);
+    pktbuf_ref_inc(n->pkt_payload);
+
+    memoryinfo_alloc(&pkt_memoryinfo, sizeof(*pkt));
+  }
+
+  return n;
+}
+
+
+/**
+ *
+ */
+th_pkt_t *
+pkt_copy_nodata(th_pkt_t *pkt)
+{
+  th_pkt_t *n = malloc(sizeof(th_pkt_t));
+
+  if (n) {
+    *n = *pkt;
+
+    n->pkt_refcount = 1;
+
+    n->pkt_meta = n->pkt_payload = NULL;
+
+    memoryinfo_alloc(&pkt_memoryinfo, sizeof(*pkt));
+  }
+
+  return n;
+}
+
 
 /**
  *
@@ -86,6 +143,41 @@ pkt_ref_inc_poly(th_pkt_t *pkt, int n)
   atomic_add(&pkt->pkt_refcount, n);
 }
 
+/**
+ *
+ */
+void
+pkt_trace_(const char *file, int line, int subsys, th_pkt_t *pkt,
+           int index, streaming_component_type_t type, const char *fmt, ...)
+{
+  char buf[512], _dts[22], _pts[22], _type[2];
+  va_list args;
+
+  va_start(args, fmt);
+  if (pkt->pkt_frametype) {
+    _type[0] = pkt_frametype_to_char(pkt->pkt_frametype);
+    _type[1] = '\0';
+  } else {
+    _type[0] = '\0';
+  }
+  snprintf(buf, sizeof(buf),
+           "%s%spkt stream %d %s%s%s"
+           " dts %s pts %s"
+           " dur %d len %zu err %i%s",
+           fmt ? fmt : "",
+           fmt ? " (" : "",
+           index,
+           streaming_component_type2txt(type),
+           _type[0] ? " type " : "", _type,
+           pts_to_string(pkt->pkt_dts, _dts),
+           pts_to_string(pkt->pkt_pts, _pts),
+           pkt->pkt_duration,
+           pktbuf_len(pkt->pkt_payload),
+           pkt->pkt_err,
+           fmt ? ")" : "");
+  tvhlogv(file, line, LOG_TRACE, subsys, buf, &args);
+  va_end(args);
+}
 
 /**
  *
@@ -95,10 +187,13 @@ pktref_clear_queue(struct th_pktref_queue *q)
 {
   th_pktref_t *pr;
 
-  while((pr = TAILQ_FIRST(q)) != NULL) {
-    TAILQ_REMOVE(q, pr, pr_link);
-    pkt_ref_dec(pr->pr_pkt);
-    free(pr);
+  if (q) {
+    while((pr = TAILQ_FIRST(q)) != NULL) {
+      TAILQ_REMOVE(q, pr, pr_link);
+      pkt_ref_dec(pr->pr_pkt);
+      free(pr);
+      memoryinfo_free(&pktref_memoryinfo, sizeof(*pr));
+    }
   }
 }
 
@@ -110,8 +205,11 @@ void
 pktref_enqueue(struct th_pktref_queue *q, th_pkt_t *pkt)
 {
   th_pktref_t *pr = malloc(sizeof(th_pktref_t));
-  pr->pr_pkt = pkt;
-  TAILQ_INSERT_TAIL(q, pr, pr_link);
+  if (pr) {
+    pr->pr_pkt = pkt;
+    TAILQ_INSERT_TAIL(q, pr, pr_link);
+    memoryinfo_alloc(&pktref_memoryinfo, sizeof(*pr));
+  }
 }
 
 
@@ -121,29 +219,46 @@ pktref_enqueue(struct th_pktref_queue *q, th_pkt_t *pkt)
 void
 pktref_remove(struct th_pktref_queue *q, th_pktref_t *pr)
 {
-  TAILQ_REMOVE(q, pr, pr_link);
-  pkt_ref_dec(pr->pr_pkt);
-  free(pr);
+  if (pr) {
+    if (q)
+      TAILQ_REMOVE(q, pr, pr_link);
+    pkt_ref_dec(pr->pr_pkt);
+    free(pr);
+    memoryinfo_free(&pktref_memoryinfo, sizeof(*pr));
+  }
 }
-
 
 /**
  *
  */
 th_pkt_t *
-pkt_copy_shallow(th_pkt_t *pkt)
+pktref_get_first(struct th_pktref_queue *q)
 {
-  th_pkt_t *n = malloc(sizeof(th_pkt_t));
-  *n = *pkt;
+  th_pktref_t *pr;
+  th_pkt_t *pkt;
 
-  n->pkt_refcount = 1;
-
-  pktbuf_ref_inc(n->pkt_meta);
-  pktbuf_ref_inc(n->pkt_payload);
-
-  return n;
+  pr = TAILQ_FIRST(q);
+  if (pr) {
+    pkt = pr->pr_pkt;
+    TAILQ_REMOVE(q, pr, pr_link);
+    free(pr);
+    memoryinfo_free(&pktref_memoryinfo, sizeof(*pr));
+    return pkt;
+  }
+  return NULL;
 }
 
+/**
+ *
+ */
+void
+pktref_insert_head(struct th_pktref_queue *q, th_pkt_t *pkt)
+{
+  th_pktref_t *pr;
+
+  pr = pktref_create(pkt);
+  TAILQ_INSERT_HEAD(q, pr, pr_link);
+}
 
 /**
  *
@@ -152,7 +267,10 @@ th_pktref_t *
 pktref_create(th_pkt_t *pkt)
 {
   th_pktref_t *pr = malloc(sizeof(th_pktref_t));
-  pr->pr_pkt = pkt;
+  if (pr) {
+    pr->pr_pkt = pkt;
+    memoryinfo_alloc(&pktref_memoryinfo, sizeof(*pr));
+  }
   return pr;
 }
 
@@ -161,10 +279,21 @@ pktref_create(th_pkt_t *pkt)
  */
 
 void
+pktbuf_destroy(pktbuf_t *pb)
+{
+  if (pb) {
+    memoryinfo_free(&pktbuf_memoryinfo, sizeof(*pb) + pb->pb_size);
+    free(pb->pb_data);
+    free(pb);
+  }
+}
+
+void
 pktbuf_ref_dec(pktbuf_t *pb)
 {
   if (pb) {
     if((atomic_add(&pb->pb_refcount, -1)) == 1) {
+      memoryinfo_free(&pktbuf_memoryinfo, sizeof(*pb) + pb->pb_size);
       free(pb->pb_data);
       free(pb);
     }
@@ -185,17 +314,23 @@ pktbuf_t *
 pktbuf_alloc(const void *data, size_t size)
 {
   pktbuf_t *pb = malloc(sizeof(pktbuf_t));
+
+  if (pb == NULL) return NULL;
   pb->pb_refcount = 1;
   pb->pb_size = size;
   pb->pb_err = 0;
-
   if(size > 0) {
     pb->pb_data = malloc(size);
-    if(data != NULL)
-      memcpy(pb->pb_data, data, size);
+    if (pb->pb_data != NULL) {
+      if (data != NULL)
+        memcpy(pb->pb_data, data, size);
+    } else {
+      pb->pb_size = 0;
+    }
   } else {
     pb->pb_data = NULL;
   }
+  memoryinfo_alloc(&pktbuf_memoryinfo, sizeof(*pb) + pb->pb_size);
   return pb;
 }
 
@@ -203,19 +338,39 @@ pktbuf_t *
 pktbuf_make(void *data, size_t size)
 {
   pktbuf_t *pb = malloc(sizeof(pktbuf_t));
-  pb->pb_refcount = 1;
-  pb->pb_size = size;
-  pb->pb_data = data;
+  if (pb) {
+    pb->pb_refcount = 1;
+    pb->pb_size = size;
+    pb->pb_data = data;
+    memoryinfo_alloc(&pktbuf_memoryinfo, sizeof(*pb) + pb->pb_size);
+  }
   return pb;
 }
 
 pktbuf_t *
 pktbuf_append(pktbuf_t *pb, const void *data, size_t size)
 {
+  void *ndata;
   if (pb == NULL)
     return pktbuf_alloc(data, size);
-  pb->pb_data = realloc(pb->pb_data, pb->pb_size + size);
-  memcpy(pb->pb_data + pb->pb_size, data, size);
-  pb->pb_size += size;
+  ndata = realloc(pb->pb_data, pb->pb_size + size);
+  if (ndata) {
+    pb->pb_data = ndata;
+    memcpy(ndata + pb->pb_size, data, size);
+    pb->pb_size += size;
+    memoryinfo_append(&pktbuf_memoryinfo, size);
+  }
   return pb;
+}
+
+/*
+ *
+ */
+
+const char *pts_to_string(int64_t pts, char *buf)
+{
+  if (pts == PTS_UNSET)
+    return strcpy(buf, "<unset>");
+  snprintf(buf, 22, "%"PRId64, pts);
+  return buf;
 }

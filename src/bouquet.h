@@ -30,8 +30,6 @@ typedef struct bouquet {
 
   int           bq_saveflag;
   int           bq_in_load;
-  int           bq_only_bq_lcn;
-  time_t        bq_updated;
 
   int           bq_shield;
   int           bq_enabled;
@@ -40,7 +38,12 @@ typedef struct bouquet {
   int           bq_mapnolcn;
   int           bq_mapnoname;
   int           bq_mapradio;
+  int           bq_mapencrypted;
+  int           bq_mapmergename;
   int           bq_chtag;
+  int           bq_chtag_type_tags;
+  int           bq_chtag_provider_tags;
+  int           bq_chtag_network_tags;
   channel_tag_t*bq_chtag_ptr;
   const char   *bq_chtag_waiting;
   char         *bq_name;
@@ -54,7 +57,11 @@ typedef struct bouquet {
   htsmsg_t     *bq_services_waiting;
   uint32_t      bq_services_seen;
   uint32_t      bq_lcn_offset;
-  uint64_t      bq_last_lcn;
+
+  /* fastscan bouquet helpers */
+  int           bq_fastscan_nit;
+  int           bq_fastscan_sdt;
+  void         *bq_fastscan_bi;
 
   void         *bq_download;
 
@@ -93,10 +100,10 @@ void bouquet_notify_channels(bouquet_t *bq);
 void bouquet_add_service(bouquet_t *bq, service_t *s, uint64_t lcn, const char *tag);
 void bouquet_completed(bouquet_t *bq, uint32_t seen);
 void bouquet_change_comment(bouquet_t *bq, const char *comment, int replace);
+void bouquet_scan(bouquet_t *bq);
+void bouquet_detach(channel_t *ch);
 
 uint64_t bouquet_get_channel_number(bouquet_t *bq, service_t *t);
-
-void bouquet_save(bouquet_t *bq, int notify);
 
 /**
  *

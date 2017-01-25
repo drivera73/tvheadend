@@ -109,11 +109,14 @@ linuxdvb_switch_class_get_title ( idnode_t *o, const char *lang )
 
 extern const idclass_t linuxdvb_diseqc_class;
 
+CLASS_DOC(linuxdvb_satconf)
+
 const idclass_t linuxdvb_switch_class =
 {
   .ic_super       = &linuxdvb_diseqc_class,
   .ic_class       = "linuxdvb_switch",
-  .ic_caption     = N_("DiseqC switch"),
+  .ic_caption     = N_("TV Adapters - SatConfig - DiseqC Switch"),
+  .ic_doc         = tvh_doc_linuxdvb_satconf_class,
   .ic_get_title   = linuxdvb_switch_class_get_title,
   .ic_properties  = (const property_t[]) {
     {
@@ -196,14 +199,14 @@ linuxdvb_switch_tune
           if (linuxdvb_diseqc_send(fd, 0xE0 | r2, 0x10, 0x39, 1,
                                    0xF0 | ls->ls_uncommitted))
             return -1;
-          usleep(slp);
+          tvh_safe_usleep(slp);
         }
 
       /* Committed */
       if (ls->ls_committed >= 0) {
         if (linuxdvb_diseqc_send(fd, 0xE0 | r1, 0x10, 0x38, 1, com))
           return -1;
-        usleep(slp);
+        tvh_safe_usleep(slp);
       }
 
       if (!ls->ls_uncommitted_first) {
@@ -212,7 +215,7 @@ linuxdvb_switch_tune
           if (linuxdvb_diseqc_send(fd, 0xE0 | r2, 0x10, 0x39, 1,
                                    0xF0 | ls->ls_uncommitted))
             return -1;
-          usleep(slp);
+          tvh_safe_usleep(slp);
         }
       }
 
@@ -236,10 +239,10 @@ linuxdvb_switch_tune
       return -1;
 
     lsp->ls_last_toneburst = 0;
-    tvhtrace("diseqc", "toneburst %s", ls->ls_toneburst ? "B" : "A");
+    tvhtrace(LS_DISEQC, "toneburst %s", ls->ls_toneburst ? "B" : "A");
     if (ioctl(fd, FE_DISEQC_SEND_BURST,
               ls->ls_toneburst ? SEC_MINI_B : SEC_MINI_A)) {
-      tvherror("diseqc", "failed to set toneburst (e=%s)", strerror(errno));
+      tvherror(LS_DISEQC, "failed to set toneburst (e=%s)", strerror(errno));
       return -1;
     }
     lsp->ls_last_toneburst = ls->ls_toneburst + 1;
@@ -256,8 +259,8 @@ htsmsg_t *
 linuxdvb_switch_list ( void *o, const char *lang )
 {
   htsmsg_t *m = htsmsg_create_list();
-  htsmsg_add_str(m, NULL, tvh_gettext_lang(lang, N_("None")));
-  htsmsg_add_str(m, NULL, tvh_gettext_lang(lang, N_("Generic")));
+  htsmsg_add_msg(m, NULL, htsmsg_create_key_val("", tvh_gettext_lang(lang, N_("None"))));
+  htsmsg_add_msg(m, NULL, htsmsg_create_key_val("Generic", tvh_gettext_lang(lang, N_("Generic"))));
   return m;
 }
 

@@ -68,8 +68,6 @@ typedef TAILQ_HEAD(linuxdvb_satconf_ele_list,linuxdvb_satconf_ele) linuxdvb_satc
 typedef TAILQ_HEAD(linuxdvb_ca_capmt_queue,linuxdvb_ca_capmt) linuxdvb_ca_capmt_queue_t;
 #endif
 
-extern const idclass_t linuxdvb_adapter_class;
-
 struct linuxdvb_adapter
 {
   tvh_hardware_t;
@@ -126,7 +124,7 @@ struct linuxdvb_frontend
   pthread_t                 lfe_dvr_thread;
   th_pipe_t                 lfe_dvr_pipe;
   pthread_mutex_t           lfe_dvr_lock;
-  pthread_cond_t            lfe_dvr_cond;
+  tvh_cond_t                lfe_dvr_cond;
   mpegts_apids_t            lfe_pids;
   int                       lfe_pids_max;
  
@@ -143,7 +141,7 @@ struct linuxdvb_frontend
   int                       lfe_nodata;
   int                       lfe_freq;
   time_t                    lfe_monitor;
-  gtimer_t                  lfe_monitor_timer;
+  mtimer_t                  lfe_monitor_timer;
   tvhlog_limit_t            lfe_status_log;
 
   /*
@@ -181,8 +179,8 @@ struct linuxdvb_ca
   int                       lca_enabled;
   int                       lca_high_bitrate_mode;
   int                       lca_capmt_query;
-  gtimer_t                  lca_monitor_timer;
-  gtimer_t                  lca_capmt_queue_timer;
+  mtimer_t                  lca_monitor_timer;
+  mtimer_t                  lca_capmt_queue_timer;
   int                       lca_capmt_interval;
   int                       lca_capmt_query_interval;
   pthread_t                 lca_en50221_thread;
@@ -242,7 +240,7 @@ struct linuxdvb_satconf
   /*
    * Diseqc handling
    */
-  gtimer_t               ls_diseqc_timer;
+  mtimer_t               ls_diseqc_timer;
   int                    ls_diseqc_idx;
   int                    ls_diseqc_repeats;
   int                    ls_diseqc_full;
@@ -331,6 +329,9 @@ struct linuxdvb_lnb
   int       (*lnb_pol)  (linuxdvb_lnb_t*, dvb_mux_t*);
 };
 
+#define UNICABLE_EN50494     50494
+#define UNICABLE_EN50607     50607
+
 struct linuxdvb_en50494
 {
   linuxdvb_diseqc_t;
@@ -346,6 +347,40 @@ struct linuxdvb_en50494
 };
 
 /*
+ * Classes
+ */
+
+extern const idclass_t linuxdvb_adapter_class;
+extern const idclass_t linuxdvb_ca_class;
+
+extern const idclass_t linuxdvb_frontend_dvbt_class;
+extern const idclass_t linuxdvb_frontend_dvbs_class;
+extern const idclass_t linuxdvb_frontend_dvbs_slave_class;
+extern const idclass_t linuxdvb_frontend_dvbc_class;
+extern const idclass_t linuxdvb_frontend_atsc_t_class;
+extern const idclass_t linuxdvb_frontend_atsc_c_class;
+extern const idclass_t linuxdvb_frontend_isdb_t_class;
+extern const idclass_t linuxdvb_frontend_isdb_c_class;
+extern const idclass_t linuxdvb_frontend_isdb_s_class;
+extern const idclass_t linuxdvb_frontend_dab_class;
+
+extern const idclass_t linuxdvb_lnb_class;
+extern const idclass_t linuxdvb_rotor_class;
+extern const idclass_t linuxdvb_rotor_gotox_class;
+extern const idclass_t linuxdvb_rotor_usals_class;
+extern const idclass_t linuxdvb_en50494_class;
+extern const idclass_t linuxdvb_switch_class;
+extern const idclass_t linuxdvb_diseqc_class;
+
+extern const idclass_t linuxdvb_satconf_class;
+extern const idclass_t linuxdvb_satconf_lnbonly_class;
+extern const idclass_t linuxdvb_satconf_2port_class;
+extern const idclass_t linuxdvb_satconf_4port_class;
+extern const idclass_t linuxdvb_satconf_en50494_class;
+extern const idclass_t linuxdvb_satconf_advanced_class;
+extern const idclass_t linuxdvb_satconf_ele_class;
+
+/*
  * Methods
  */
   
@@ -356,7 +391,8 @@ void linuxdvb_adapter_init ( void );
 
 void linuxdvb_adapter_done ( void );
 
-void linuxdvb_adapter_save ( linuxdvb_adapter_t *la );
+static inline void linuxdvb_adapter_changed ( linuxdvb_adapter_t *la )
+  { idnode_changed(&la->th_id); }
 
 int  linuxdvb_adapter_current_weight ( linuxdvb_adapter_t *la );
 
@@ -415,6 +451,10 @@ linuxdvb_diseqc_t *linuxdvb_switch_create0
   ( const char *name, htsmsg_t *conf, linuxdvb_satconf_ele_t *ls, int c, int u );
 linuxdvb_diseqc_t *linuxdvb_rotor_create0
   ( const char *name, htsmsg_t *conf, linuxdvb_satconf_ele_t *ls );
+
+#define UNICABLE_I_NAME       "Unicable I (EN50494)"
+#define UNICABLE_II_NAME      "Unicable II (EN50607)"
+
 linuxdvb_diseqc_t *linuxdvb_en50494_create0
   ( const char *name, htsmsg_t *conf, linuxdvb_satconf_ele_t *ls, int port );
 
@@ -428,11 +468,18 @@ htsmsg_t *linuxdvb_switch_list  ( void *o, const char *lang );
 htsmsg_t *linuxdvb_rotor_list   ( void *o, const char *lang );
 htsmsg_t *linuxdvb_en50494_list ( void *o, const char *lang );
 
-htsmsg_t *linuxdvb_en50494_id_list ( void *o, const char *lang );
+htsmsg_t *linuxdvb_en50494_id_list  ( void *o, const char *lang );
+htsmsg_t *linuxdvb_en50607_id_list  ( void *o, const char *lang );
 htsmsg_t *linuxdvb_en50494_pin_list ( void *o, const char *lang );
+
+static inline int linuxdvb_unicable_is_en50607( const char *str )
+  { return strcmp(str, UNICABLE_II_NAME) == 0; }
+static inline int linuxdvb_unicable_is_en50494( const char *str )
+  { return !linuxdvb_unicable_is_en50607(str); }
 
 void linuxdvb_en50494_init (void);
 
+int linuxdvb_diseqc_raw_send (int fd, uint8_t len, ...);
 int
 linuxdvb_diseqc_send
   (int fd, uint8_t framing, uint8_t addr, uint8_t cmd, uint8_t len, ...);

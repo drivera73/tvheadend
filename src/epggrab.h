@@ -99,6 +99,10 @@ typedef struct epggrab_channel
 
   int                       only_one; ///< Map to only one channel (auto)
   idnode_list_head_t        channels; ///< Mapped channels (1 = epggrab channel, 2 = channel)
+
+  int                       update_chicon; ///< Update channel icon
+  int                       update_chnum;  ///< Update channel number
+  int                       update_chname; ///< Update channel name
 } epggrab_channel_t;
 
 /*
@@ -148,6 +152,7 @@ struct epggrab_module
     EPGGRAB_EXT,
   }                            type;      ///< Grabber type
   const char                   *id;       ///< Module identifier
+  int                          subsys;    ///< Module log subsystem
   const char                   *saveid;   ///< Module save identifier
   const char                   *name;     ///< Module name (for display)
   int                          enabled;   ///< Whether the module is enabled
@@ -171,6 +176,8 @@ struct epggrab_module_int
 
   const char                   *path;     ///< Path for the command
   const char                   *args;     ///< Extra arguments
+
+  int                           xmltv_chnum;
 
   /* Handle data */
   char*     (*grab)   ( void *mod );
@@ -210,8 +217,8 @@ struct epggrab_ota_mux
   uint8_t                            om_complete;     ///< Has completed a scan
   uint8_t                            om_requeue;      ///< Requeue when stolen
   uint8_t                            om_save;         ///< something changed
-  gtimer_t                           om_timer;        ///< Per mux active timer
-  gtimer_t                           om_data_timer;   ///< Any EPG data seen?
+  mtimer_t                           om_timer;        ///< Per mux active timer
+  mtimer_t                           om_data_timer;   ///< Any EPG data seen?
 
   char                              *om_force_modname;///< Force this module
 
@@ -304,13 +311,13 @@ extern int                   epggrab_ota_running;
 int epggrab_activate_module       ( epggrab_module_t *mod, int activate );
 void epggrab_ota_set_cron         ( void );
 void epggrab_ota_trigger          ( int secs );
+void epggrab_rerun_internal       ( void );
 
 /*
  * Load/Save
  */
 void epggrab_init                 ( void );
 void epggrab_done                 ( void );
-void epggrab_save                 ( void );
 void epggrab_ota_init             ( void );
 void epggrab_ota_post             ( void );
 void epggrab_ota_shutdown         ( void );

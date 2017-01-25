@@ -41,8 +41,6 @@ static LIST_HEAD(,profile_chain) profile_chains;
 
 static profile_t *profile_default;
 
-static void profile_class_save ( idnode_t *in );
-
 /*
  *
  */
@@ -51,6 +49,7 @@ void
 profile_register(const idclass_t *clazz, profile_builder_t builder)
 {
   profile_build_t *pb = calloc(1, sizeof(*pb)), *pb2;
+  idclass_register(clazz);
   pb->clazz = clazz;
   pb->build = builder;
   pb2 = LIST_FIRST(&profile_builders);
@@ -88,12 +87,12 @@ profile_create
   if ((s = htsmsg_get_str(conf, "class")) != NULL)
     pb = profile_class_find(s);
   if (pb == NULL) {
-    tvherror("profile", "wrong class %s!", s);
+    tvherror(LS_PROFILE, "wrong class %s!", s);
     return NULL;
   }
   pro = pb->build();
   if (pro == NULL) {
-    tvherror("profile", "Profile class %s is not available!", s);
+    tvherror(LS_PROFILE, "Profile class %s is not available!", s);
     return NULL;
   }
   LIST_INIT(&pro->pro_dvr_configs);
@@ -101,7 +100,7 @@ profile_create
   pro->pro_contaccess = 1;
   if (idnode_insert(&pro->pro_id, uuid, pb->clazz, 0)) {
     if (uuid)
-      tvherror("profile", "invalid uuid '%s'", uuid);
+      tvherror(LS_PROFILE, "invalid uuid '%s'", uuid);
     free(pro);
     return NULL;
   }
@@ -114,7 +113,7 @@ profile_create
   pro->pro_refcount = 1;
   TAILQ_INSERT_TAIL(&profiles, pro, pro_link);
   if (save)
-    profile_class_save((idnode_t *)pro);
+    idnode_changed(&pro->pro_id);
   if (pro->pro_conf_changed)
     pro->pro_conf_changed(pro);
   return pro;
@@ -134,6 +133,7 @@ static void
 profile_delete(profile_t *pro, int delconf)
 {
   char ubuf[UUID_HEX_SIZE];
+  idnode_save_check(&pro->pro_id, delconf);
   pro->pro_enabled = 0;
   if (pro->pro_conf_changed)
     pro->pro_conf_changed(pro);
@@ -146,8 +146,8 @@ profile_delete(profile_t *pro, int delconf)
   profile_release(pro);
 }
 
-static void
-profile_class_save ( idnode_t *in )
+static htsmsg_t *
+profile_class_save ( idnode_t *in, char *filename, size_t fsize )
 {
   profile_t *pro = (profile_t *)in;
   htsmsg_t *c = htsmsg_create_map();
@@ -157,10 +157,10 @@ profile_class_save ( idnode_t *in )
   idnode_save(in, c);
   if (pro->pro_shield)
     htsmsg_add_bool(c, "shield", 1);
-  hts_settings_save(c, "profile/%s", idnode_uuid_as_str(in, ubuf));
-  htsmsg_destroy(c);
+  snprintf(filename, fsize, "profile/%s", idnode_uuid_as_str(in, ubuf));
   if (pro->pro_conf_changed)
     pro->pro_conf_changed(pro);
+  return c;
 }
 
 static const char *
@@ -224,7 +224,7 @@ profile_class_default_set(void *o, const void *v)
     old = profile_default;
     profile_default = pro;
     if (old)
-      profile_class_save(&old->pro_id);
+      idnode_changed(&old->pro_id);
     return 1;
   }
   return 0;
@@ -263,18 +263,22 @@ static htsmsg_t *
 profile_class_svfilter_list ( void *o, const char *lang )
 {
   static const struct strtab tab[] = {
-    { N_("None"),                    PROFILE_SVF_NONE },
-    { N_("SD: standard definition"), PROFILE_SVF_SD },
-    { N_("HD: high definition"),     PROFILE_SVF_HD },
+    { N_("None"),                       PROFILE_SVF_NONE },
+    { N_("SD: standard definition"),    PROFILE_SVF_SD },
+    { N_("HD: high definition"),        PROFILE_SVF_HD },
+    { N_("UHD: ultra high definition"), PROFILE_SVF_UHD },
   };
   return strtab2htsmsg(tab, 1, lang);
 }
 
+CLASS_DOC(profile)
+
 const idclass_t profile_class =
 {
   .ic_class      = "profile",
-  .ic_caption    = N_("Stream profile"),
+  .ic_caption    = N_("Stream Profile"),
   .ic_event      = "profile",
+  .ic_doc        = tvh_doc_profile_class,
   .ic_perm_def   = ACCESS_ADMIN,
   .ic_save       = profile_class_save,
   .ic_get_title  = profile_class_get_title,
@@ -303,7 +307,8 @@ const idclass_t profile_class =
       .desc     = N_("Enable/disable the profile."),
       .off      = offsetof(profile_t, pro_enabled),
       .get_opts = profile_class_enabled_opts,
-      .group    = 1
+      .group    = 1,
+      .def.i    = 1
     },
     {
       .type     = PT_BOOL,
@@ -461,7 +466,7 @@ profile_find_by_name(const char *name, const char *alt)
 /*
  *
  */
-static int
+int
 profile_verify(profile_t *pro, int sflags)
 {
   if (!pro)
@@ -542,9 +547,12 @@ htsmsg_t *
 profile_class_get_list(void *o, const char *lang)
 {
   htsmsg_t *m = htsmsg_create_map();
+  htsmsg_t *p = htsmsg_create_map();
   htsmsg_add_str(m, "type",  "api");
   htsmsg_add_str(m, "uri",   "profile/list");
   htsmsg_add_str(m, "event", "profile");
+  htsmsg_add_u32(p, "all",  1);
+  htsmsg_add_msg(m, "params", p);
   return m;
 }
 
@@ -652,6 +660,22 @@ direct:
   profile_deliver(prch, sm);
 }
 
+static htsmsg_t *
+profile_input_info(void *opaque, htsmsg_t *list)
+{
+  profile_chain_t *prch = opaque;
+  streaming_target_t *st = prch->prch_share;
+  htsmsg_add_str(list, NULL, "profile input");
+  st->st_ops.st_info(st->st_opaque, list);
+  st = prch->prch_post_share;
+  return st->st_ops.st_info(st->st_opaque, list);
+}
+
+static streaming_ops_t profile_input_ops = {
+  .st_cb   = profile_input,
+  .st_info = profile_input_info
+};
+
 /*
  *
  */
@@ -728,6 +752,18 @@ profile_sharer_input(void *opaque, streaming_message_t *sm)
     streaming_msg_free(sm);
 }
 
+static htsmsg_t *
+profile_sharer_input_info(void *opaque, htsmsg_t *list)
+{
+  htsmsg_add_str(list, NULL, "profile sharer input");
+  return list;
+}
+
+static streaming_ops_t profile_sharer_input_ops = {
+  .st_cb   = profile_sharer_input,
+  .st_info = profile_sharer_input_info
+};
+
 /*
  *
  */
@@ -749,7 +785,7 @@ profile_sharer_find(profile_chain_t *prch)
   }
   if (!prsh) {
     prsh = calloc(1, sizeof(*prsh));
-    streaming_target_init(&prsh->prsh_input, profile_sharer_input, prsh, 0);
+    streaming_target_init(&prsh->prsh_input, &profile_sharer_input_ops, prsh, 0);
     LIST_INIT(&prsh->prsh_chains);
   }
   return prsh;
@@ -969,7 +1005,7 @@ const idclass_t profile_htsp_class =
 {
   .ic_super      = &profile_class,
   .ic_class      = "profile-htsp",
-  .ic_caption    = N_("HTSP stream profile"),
+  .ic_caption    = N_("HTSP Stream Profile"),
   .ic_properties = (const property_t[]){
     /* Ready for future extensions */
     { }
@@ -1002,7 +1038,7 @@ profile_htsp_work(profile_chain_t *prch,
 
   prch->prch_share = prsh->prsh_tsfix;
   prch->prch_flags = SUBSCRIPTION_PACKET;
-  streaming_target_init(&prch->prch_input, profile_input, prch, 0);
+  streaming_target_init(&prch->prch_input, &profile_input_ops, prch, 0);
   prch->prch_st = &prch->prch_input;
   return 0;
 
@@ -1060,10 +1096,10 @@ const idclass_t profile_mpegts_pass_class =
       .id       = "rewrite_pmt",
       .name     = N_("Rewrite PMT"),
       .desc     = N_("Rewrite PMT (Program Map Table) packets to only "
-                     "include information about the currently streamed "
+                     "include information about the currently-streamed "
                      "service."),
       .off      = offsetof(profile_mpegts_t, pro_rewrite_pmt),
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT,
       .def.i    = 1,
       .group    = 2
     },
@@ -1072,10 +1108,10 @@ const idclass_t profile_mpegts_pass_class =
       .id       = "rewrite_pat",
       .name     = N_("Rewrite PAT"),
       .desc     = N_("Rewrite PAT (Program Association Table) packets "
-                     "to only include information about the currently "
+                     "to only include information about the currently-"
                      "streamed service."),
       .off      = offsetof(profile_mpegts_t, pro_rewrite_pat),
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT,
       .def.i    = 1,
       .group    = 2
     },
@@ -1084,10 +1120,10 @@ const idclass_t profile_mpegts_pass_class =
       .id       = "rewrite_sdt",
       .name     = N_("Rewrite SDT"),
       .desc     = N_("Rewrite SDT (Service Description Table) packets "
-                     "to only include information about the currently "
+                     "to only include information about the currently-"
                      "streamed service."),
       .off      = offsetof(profile_mpegts_t, pro_rewrite_sdt),
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT,
       .def.i    = 1,
       .group    = 2
     },
@@ -1096,10 +1132,10 @@ const idclass_t profile_mpegts_pass_class =
       .id       = "rewrite_eit",
       .name     = N_("Rewrite EIT"),
       .desc     = N_("Rewrite EIT (Event Information Table) packets "
-                     "to only include information about the currently "
+                     "to only include information about the currently-"
                      "streamed service."),
       .off      = offsetof(profile_mpegts_t, pro_rewrite_eit),
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT,
       .def.i    = 1,
       .group    = 2
     },
@@ -1259,6 +1295,118 @@ profile_matroska_builder(void)
   pro->pro_get_mc = profile_matroska_get_mc;
   return (profile_t *)pro;
 }
+
+
+/*
+ *  Audioes Muxer
+ */
+typedef struct profile_audio {
+  profile_t;
+  int pro_mc;
+  int pro_index;
+} profile_audio_t;
+
+static htsmsg_t *
+profile_class_mc_audio_list ( void *o, const char *lang )
+{
+  static const struct strtab tab[] = {
+    { N_("Any"),                          MC_UNKNOWN },
+    { N_("MPEG-2 audio"),                 MC_MPEG2AUDIO, },
+    { N_("AC3 audio"),                    MC_AC3, },
+    { N_("AAC audio"),                    MC_AAC },
+    { N_("MP4 audio"),                    MC_MP4A },
+    { N_("Vorbis audio"),                 MC_VORBIS },
+  };
+  return strtab2htsmsg(tab, 1, lang);
+}
+
+const idclass_t profile_audio_class =
+{
+  .ic_super      = &profile_class,
+  .ic_class      = "profile-audio",
+  .ic_caption    = N_("Audio stream"),
+  .ic_properties = (const property_t[]){
+    {
+      .type     = PT_INT,
+      .id       = "type",
+      .name     = N_("Audio type"),
+      .desc     = N_("Pick the stream with given audio type only."),
+      .off      = offsetof(profile_audio_t, pro_mc),
+      .list     = profile_class_mc_audio_list,
+      .group    = 1
+    },
+    {
+      .type     = PT_INT,
+      .id       = "index",
+      .name     = N_("Stream index"),
+      .desc     = N_("Stream index (starts with zero)."),
+      .off      = offsetof(profile_audio_t, pro_index),
+      .group    = 1
+    },
+    { }
+  }
+};
+
+
+static int
+profile_audio_reopen(profile_chain_t *prch,
+                     muxer_config_t *m_cfg, int flags)
+{
+  muxer_config_t c;
+  profile_audio_t *pro = (profile_audio_t *)prch->prch_pro;
+
+  if (m_cfg)
+    c = *m_cfg; /* do not alter the original parameter */
+  else
+    memset(&c, 0, sizeof(c));
+  c.m_type = pro->pro_mc != MC_UNKNOWN ? pro->pro_mc : MC_MPEG2AUDIO;
+  c.m_force_type = pro->pro_mc;
+  c.m_index = pro->pro_index;
+
+  assert(!prch->prch_muxer);
+  prch->prch_muxer = muxer_create(&c);
+  return 0;
+}
+
+static int
+profile_audio_open(profile_chain_t *prch,
+                   muxer_config_t *m_cfg, int flags, size_t qsize)
+{
+  int r;
+
+  prch->prch_flags = SUBSCRIPTION_PACKET;
+  prch->prch_sq.sq_maxsize = qsize;
+
+  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0, 0);
+  if (r) {
+    profile_chain_close(prch);
+    return r;
+  }
+
+  profile_audio_reopen(prch, m_cfg, flags);
+  return 0;
+}
+
+static muxer_container_type_t
+profile_audio_get_mc(profile_t *_pro)
+{
+  profile_audio_t *pro = (profile_audio_t *)_pro;
+  if (pro->pro_mc == MC_UNKNOWN)
+    return MC_MPEG2AUDIO;
+  return pro->pro_mc;
+}
+
+static profile_t *
+profile_audio_builder(void)
+{
+  profile_audio_t *pro = calloc(1, sizeof(*pro));
+  pro->pro_sflags = SUBSCRIPTION_PACKET;
+  pro->pro_reopen = profile_audio_reopen;
+  pro->pro_open   = profile_audio_open;
+  pro->pro_get_mc = profile_audio_get_mc;
+  return (profile_t *)pro;
+}
+
 
 #if ENABLE_LIBAV
 
@@ -1530,6 +1678,7 @@ profile_class_mc_list ( void *o, const char *lang )
     { N_("WEBM/built-in"),                MC_WEBM, },
     { N_("MPEG-TS/av-lib"),               MC_MPEGTS },
     { N_("MPEG-PS (DVD)/av-lib"),         MC_MPEGPS },
+    { N_("Raw Audio Stream"),             MC_MPEG2AUDIO },
     { N_("Matroska (mkv)/av-lib"),        MC_AVMATROSKA },
     { N_("WEBM/av-lib"),                  MC_AVWEBM },
   };
@@ -1561,15 +1710,13 @@ profile_class_language_list(void *o, const char *lang)
   char buf[128];
 
   while (lc->code2b) {
-    htsmsg_t *e = htsmsg_create_map();
+    htsmsg_t *e;
     if (!strcmp(lc->code2b, "und")) {
-      htsmsg_add_str(e, "key", "");
-      htsmsg_add_str(e, "val", tvh_gettext_lang(lang, N_("Use original")));
+      e = htsmsg_create_key_val("", tvh_gettext_lang(lang, N_("Use original")));
     } else {
-      htsmsg_add_str(e, "key", lc->code2b);
       snprintf(buf, sizeof(buf), "%s (%s)", lc->desc, lc->code2b);
       buf[sizeof(buf)-1] = '\0';
-      htsmsg_add_str(e, "val", buf);
+      e = htsmsg_create_key_val(lc->code2b, buf);
     }
     htsmsg_add_msg(l, NULL, e);
     lc++;
@@ -1598,13 +1745,9 @@ profile_class_codec_list(int (*check)(int sct), const char *lang)
   char buf[128];
   int sct;
 
-  e = htsmsg_create_map();
-  htsmsg_add_str(e, "key", "");
-  htsmsg_add_str(e, "val", tvh_gettext_lang(lang, N_("Do not use")));
+  e = htsmsg_create_key_val("", tvh_gettext_lang(lang, N_("Do not use")));
   htsmsg_add_msg(l, NULL, e);
-  e = htsmsg_create_map();
-  htsmsg_add_str(e, "key", "copy");
-  htsmsg_add_str(e, "val", tvh_gettext_lang(lang, N_("Copy codec type")));
+  e = htsmsg_create_key_val("copy", tvh_gettext_lang(lang, N_("Copy codec type")));
   htsmsg_add_msg(l, NULL, e);
   c = transcoder_get_capabilities(profile_transcode_experimental_codecs);
   HTSMSG_FOREACH(f, c) {
@@ -1621,9 +1764,7 @@ profile_class_codec_list(int (*check)(int sct), const char *lang)
       snprintf(buf, sizeof(buf), "%s: %s", s, s2);
     else
       snprintf(buf, sizeof(buf), "%s", s);
-    e = htsmsg_create_map();
-    htsmsg_add_str(e, "key", s);
-    htsmsg_add_str(e, "val", buf);
+    e = htsmsg_create_key_val(s, buf);
     htsmsg_add_msg(l, NULL, e);
   }
   htsmsg_destroy(c);
@@ -1745,7 +1886,7 @@ const idclass_t profile_transcode_class =
       .type     = PT_STR,
       .id       = "language",
       .name     = N_("Language"),
-      .desc     = N_("Audio language (Not currently used)."),
+      .desc     = N_("Preferred audio language."),
       .off      = offsetof(profile_transcode_t, pro_language),
       .list     = profile_class_language_list,
       .opts     = PO_ADVANCED,
@@ -1778,7 +1919,7 @@ const idclass_t profile_transcode_class =
       .type     = PT_U32,
       .id       = "vbitrate",
       .name     = N_("Video bitrate (kb/s) (0=auto)"),
-      .desc     = N_("Bitrate to use for the transcode. See help for "
+      .desc     = N_("Bitrate to use for the transcode. See Help for "
                      "detailed information."),
       .off      = offsetof(profile_transcode_t, pro_vbitrate),
       .opts     = PO_ADVANCED,
@@ -1790,7 +1931,7 @@ const idclass_t profile_transcode_class =
       .id       = "acodec",
       .name     = N_("Audio codec"),
       .desc     = N_("Audio codec to use for the transcode. \"Do not "
-                     "use \" will disable audio output."),
+                     "use\" will disable audio output."),
       .off      = offsetof(profile_transcode_t, pro_acodec),
       .def.s    = "libvorbis",
       .list     = profile_class_acodec_list,
@@ -1917,7 +2058,7 @@ profile_transcode_work(profile_chain_t *prch,
     prsh->prsh_tsfix = tsfix_create(dst);
   }
   prch->prch_share = prsh->prsh_tsfix;
-  streaming_target_init(&prch->prch_input, profile_input, prch, 0);
+  streaming_target_init(&prch->prch_input, &profile_input_ops, prch, 0);
   prch->prch_st = &prch->prch_input;
   return 0;
 fail:
@@ -1933,6 +2074,10 @@ profile_transcode_mc_valid(int mc)
   case MC_WEBM:
   case MC_MPEGTS:
   case MC_MPEGPS:
+  case MC_MPEG2AUDIO:
+  case MC_AC3:
+  case MC_AAC:
+  case MC_VORBIS:
   case MC_AVMATROSKA:
     return 1;
   default:
@@ -2031,6 +2176,7 @@ profile_init(void)
   profile_register(&profile_mpegts_pass_class, profile_mpegts_pass_builder);
   profile_register(&profile_matroska_class, profile_matroska_builder);
   profile_register(&profile_htsp_class, profile_htsp_builder);
+  profile_register(&profile_audio_class, profile_audio_builder);
 #if ENABLE_LIBAV
   profile_register(&profile_libav_mpegts_class, profile_libav_mpegts_builder);
   profile_register(&profile_libav_matroska_class, profile_libav_matroska_builder);
@@ -2097,6 +2243,22 @@ profile_init(void)
     htsmsg_add_str (conf, "name", name);
     htsmsg_add_str (conf, "comment", _("HTSP Default Stream Settings"));
     htsmsg_add_s32 (conf, "priority", PROFILE_SPRIO_IMPORTANT);
+    htsmsg_add_bool(conf, "shield", 1);
+    (void)profile_create(NULL, conf, 1);
+    htsmsg_destroy(conf);
+  }
+
+  name = "audio";
+  pro = profile_find_by_name2(name, NULL, 1);
+  if (pro == NULL || strcmp(profile_get_name(pro), name)) {
+    htsmsg_t *conf;
+
+    conf = htsmsg_create_map();
+    htsmsg_add_str (conf, "class", "profile-audio");
+    htsmsg_add_bool(conf, "enabled", 1);
+    htsmsg_add_str (conf, "name", name);
+    htsmsg_add_str (conf, "comment", _("Audio-only stream"));
+    htsmsg_add_s32 (conf, "priority", PROFILE_SPRIO_NORMAL);
     htsmsg_add_bool(conf, "shield", 1);
     (void)profile_create(NULL, conf, 1);
     htsmsg_destroy(conf);

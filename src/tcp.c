@@ -148,7 +148,7 @@ tcp_connect(const char *hostname, int port, const char *bindaddr,
         timeout = 0;
 
       while (1) {
-        if (!tvheadend_running) {
+        if (!tvheadend_is_running()) {
           errbuf[0] = '\0';
           tvhpoll_destroy(efd);
           close(fd);
@@ -352,7 +352,7 @@ tcp_read_timeout(int fd, void *buf, size_t len, int timeout)
     if(x == 0)
       return ETIMEDOUT;
     if(x == -1) {
-      if (!tvheadend_running)
+      if (!tvheadend_is_running())
         return ECONNRESET;
       if (ERRNO_AGAIN(errno))
         continue;
@@ -507,7 +507,7 @@ tcp_connection_launch
 {
   tcp_server_launch_t *tsl, *res;
   uint32_t used = 0, used2;
-  time_t started = dispatch_clock;
+  int64_t started = mclk();
   int c1, c2;
 
   lock_assert(&global_lock);
@@ -539,8 +539,8 @@ try_again:
     c2 = aa->aa_conn_limit_streaming ? used >= aa->aa_conn_limit_streaming : -1;
 
     if (c1 && c2) {
-      if (started + 3 < dispatch_clock) {
-        tvherror("tcp", "multiple connections are not allowed for user '%s' from '%s' "
+      if (started + sec2mono(3) < mclk()) {
+        tvherror(LS_TCP, "multiple connections are not allowed for user '%s' from '%s' "
                         "(limit %u, streaming limit %u, active streaming %u, DVR %u)",
                  aa->aa_username ?: "", aa->aa_representative ?: "",
                  aa->aa_conn_limit, aa->aa_conn_limit_streaming,
@@ -548,9 +548,9 @@ try_again:
         return NULL;
       }
       pthread_mutex_unlock(&global_lock);
-      usleep(250000);
+      tvh_safe_usleep(250000);
       pthread_mutex_lock(&global_lock);
-      if (tvheadend_running)
+      if (tvheadend_is_running())
         goto try_again;
       return NULL;
     }
@@ -649,7 +649,8 @@ tcp_server_start(void *aux)
   LIST_REMOVE(tsl, alink);
   LIST_INSERT_HEAD(&tcp_server_join, tsl, jlink);
   pthread_mutex_unlock(&global_lock);
-  tvh_write(tcp_server_pipe.wr, &c, 1);
+  if (atomic_get(&tcp_server_running))
+    tvh_write(tcp_server_pipe.wr, &c, 1);
   return NULL;
 }
 
@@ -667,10 +668,12 @@ tcp_server_loop(void *aux)
   socklen_t slen;
   char c;
 
-  while(tcp_server_running) {
+  while(atomic_get(&tcp_server_running)) {
     r = tvhpoll_wait(tcp_server_poll, &ev, 1, -1);
-    if(r == -1) {
-      perror("tcp_server: tvhpoll_wait");
+    if(r < 0) {
+      if (ERRNO_AGAIN(-r))
+        continue;
+      tvherror(LS_TCP, "tcp_server_loop: tvhpoll_wait: %s", strerror(errno));
       continue;
     }
 
@@ -735,7 +738,7 @@ next:
       tvhthread_create(&tsl->tid, NULL, tcp_server_start, tsl, "tcp-start");
     }
   }
-  tvhtrace("tcp", "server thread finished");
+  tvhtrace(LS_TCP, "server thread finished");
   return NULL;
 }
 
@@ -749,7 +752,7 @@ static void *tcp_server_create_new
 #else
 void *tcp_server_create
 #endif
-  (const char *subsystem, const char *name, const char *bindaddr,
+  (int subsystem, const char *name, const char *bindaddr,
    int port, tcp_server_ops_t *ops, void *opaque)
 {
   int fd, x;
@@ -772,8 +775,8 @@ void *tcp_server_create
   x = getaddrinfo(bindaddr, port_buf, &hints, &res);
 
   if(x != 0) {
-    tvhlog(LOG_ERR, "tcp", "getaddrinfo: %s: %s", bindaddr != NULL ? bindaddr : "*",
-      x == EAI_SYSTEM ? strerror(errno) : gai_strerror(x));
+    tvherror(LS_TCP, "getaddrinfo: %s: %s", bindaddr != NULL ? bindaddr : "*",
+             x == EAI_SYSTEM ? strerror(errno) : gai_strerror(x));
     return NULL;
   }
 
@@ -808,12 +811,12 @@ void *tcp_server_create
 
   if(x != 0)
   {
-    tvhlog(LOG_ERR, "tcp", "bind: %s:%i: %s", bindaddr != NULL ? bindaddr : "*", port, strerror(errno));
+    tvherror(LS_TCP, "bind: %s:%i: %s", bindaddr != NULL ? bindaddr : "*", port, strerror(errno));
     close(fd);
     return NULL;
   }
 
-  listen(fd, 1);
+  listen(fd, 511);
 
   ts = malloc(sizeof(tcp_server_t));
   ts->serverfd = fd;
@@ -822,7 +825,7 @@ void *tcp_server_create
   ts->opaque = opaque;
 
   tcp_get_str_from_ip((const struct sockaddr *)&bound, buf, sizeof(buf));
-  tvhlog(LOG_INFO, subsystem, "Starting %s server %s:%d", name, buf, htons(IP_PORT(bound)));
+  tvhinfo(subsystem, "Starting %s server %s:%d", name, buf, htons(IP_PORT(bound)));
 
   return ts;
 }
@@ -833,7 +836,7 @@ void *tcp_server_create
  */
 void *
 tcp_server_create
-  (const char *subsystem, const char *name, const char *bindaddr,
+  (int subsystem, const char *name, const char *bindaddr,
    int port, tcp_server_ops_t *ops, void *opaque)
 {
   int sd_fds_num, i, fd;
@@ -859,7 +862,7 @@ tcp_server_create
     memset(&bound, 0, sizeof(bound));
     s_len = sizeof(bound);
     if (getsockname(fd, (struct sockaddr *) &bound, &s_len) != 0) {
-      tvhlog(LOG_ERR, "tcp", "getsockname failed: %s", strerror(errno));
+      tvherror(LS_TCP, "getsockname failed: %s", strerror(errno));
       continue;
     }
     switch (bound.ss_family) {
@@ -888,11 +891,11 @@ tcp_server_create
     ts->ops    = *ops;
     ts->opaque = opaque;
     tcp_get_str_from_ip((const struct sockaddr *)&bound, buf, sizeof(buf));
-    tvhlog(LOG_INFO, subsystem, "Starting %s server %s:%d (systemd)", name, buf, htons(IP_PORT(bound)));
+    tvhinfo(subsystem, "Starting %s server %s:%d (systemd)", name, buf, htons(IP_PORT(bound)));
   } else {
     /* no systemd-managed socket found, create a new one */
-    tvhlog(LOG_INFO, "tcp", "No systemd socket: creating a new one");
-    ts =  tcp_server_create_new(subsystem, name, bindaddr, port, ops, opaque);
+    tvhinfo(LS_TCP, "No systemd socket: creating a new one");
+    ts = tcp_server_create_new(subsystem, name, bindaddr, port, ops, opaque);
   }
 
   return ts;
@@ -936,6 +939,8 @@ tcp_server_delete(void *server)
   ev.events   = TVHPOLL_IN;
   ev.data.ptr = ts;
   tvhpoll_rem(tcp_server_poll, &ev, 1);
+  close(ts->serverfd);
+  ts->serverfd = -1;
   LIST_INSERT_HEAD(&tcp_server_delete_list, ts, link);
   tvh_write(tcp_server_pipe.wr, &c, 1);
 }
@@ -1025,6 +1030,26 @@ tcp_server_bound ( void *server, struct sockaddr_storage *bound, int family )
   return 0;
 }
 
+/**
+ *
+ */
+int
+tcp_server_onall ( void *server )
+{
+  tcp_server_t *ts = server;
+  int i, len;
+  uint8_t *ptr;
+
+  if (server == NULL) return 0;
+
+  len = IP_IN_ADDRLEN(ts->bound);
+  ptr = (uint8_t *)IP_IN_ADDR(ts->bound);
+  for (i = 0; i < len; i++)
+    if (ptr[0])
+      break;
+  return i >= len;
+}
+
 /*
  * Connections status
  */
@@ -1083,7 +1108,7 @@ tcp_server_init(void)
   ev.data.ptr = &tcp_server_pipe;
   tvhpoll_add(tcp_server_poll, &ev, 1);
 
-  tcp_server_running = 1;
+  atomic_set(&tcp_server_running, 1);
   tvhthread_create(&tcp_server_tid, NULL, tcp_server_loop, NULL, "tcp-loop");
 }
 
@@ -1095,7 +1120,7 @@ tcp_server_done(void)
   char c = 'E';
   int64_t t;
 
-  tcp_server_running = 0;
+  atomic_set(&tcp_server_running, 0);
   tvh_write(tcp_server_pipe.wr, &c, 1);
 
   pthread_mutex_lock(&global_lock);
@@ -1112,14 +1137,15 @@ tcp_server_done(void)
   tvh_pipe_close(&tcp_server_pipe);
   tvhpoll_destroy(tcp_server_poll);
   
-  t = getmonoclock();
-  while (LIST_FIRST(&tcp_server_active) != NULL) {
-    if (getmonoclock() - t > 5000000)
-      tvhtrace("tcp", "tcp server %p active too long", LIST_FIRST(&tcp_server_active));
-    usleep(20000);
-  }
-
   pthread_mutex_lock(&global_lock);
+  t = mclk();
+  while (LIST_FIRST(&tcp_server_active) != NULL) {
+    if (t + sec2mono(5) < mclk())
+      tvhtrace(LS_TCP, "tcp server %p active too long", LIST_FIRST(&tcp_server_active));
+    pthread_mutex_unlock(&global_lock);
+    tvh_safe_usleep(20000);
+    pthread_mutex_lock(&global_lock);
+  }
   while ((tsl = LIST_FIRST(&tcp_server_join)) != NULL) {
     LIST_REMOVE(tsl, jlink);
     pthread_mutex_unlock(&global_lock);

@@ -34,7 +34,13 @@ mpegts_network_scan_notify ( mpegts_mux_t *mm )
 static int
 mm_cmp ( mpegts_mux_t *a, mpegts_mux_t *b )
 {
-  return b->mm_scan_weight - a->mm_scan_weight;
+  int r = b->mm_scan_weight - a->mm_scan_weight;
+  if (r == 0) {
+    r = MINMAX(-1, 1, b->mm_start_monoclock - a->mm_start_monoclock);
+    if (r == 0)
+      return mpegts_mux_compare(a, b);
+  }
+  return r;
 }
 
 void
@@ -79,7 +85,7 @@ mpegts_network_scan_timer_cb ( void *p )
     TAILQ_REMOVE(&mn->mn_scan_pend, mm, mm_scan_link);
     if (mm->mm_scan_result != MM_SCAN_FAIL) {
       mm->mm_scan_result = MM_SCAN_FAIL;
-      mm->mm_config_save(mm);
+      idnode_changed(&mm->mm_id);
     }
     mm->mm_scan_state  = MM_SCAN_STATE_IDLE;
     mm->mm_scan_weight = 0;
@@ -89,7 +95,7 @@ mpegts_network_scan_timer_cb ( void *p )
   /* Re-arm timer. Really this is just a safety measure as we'd normally
    * expect the timer to be forcefully triggered on finish of a mux scan
    */
-  gtimer_arm(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, 120);
+  mtimer_arm_rel(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, sec2mono(120));
 }
 
 /******************************************************************************
@@ -102,16 +108,22 @@ mpegts_network_scan_mux_done0
   ( mpegts_mux_t *mm, mpegts_mux_scan_result_t result, int weight )
 {
   mpegts_network_t *mn = mm->mm_network;
+  mpegts_mux_scan_state_t state = mm->mm_scan_state;
 
+  /* prevent double del: */
+  /*   mpegts_mux_stop -> mpegts_network_scan_mux_cancel */
+  mm->mm_scan_state = MM_SCAN_STATE_IDLE;
   mpegts_mux_unsubscribe_by_name(mm, "scan");
-  if (mm->mm_scan_state == MM_SCAN_STATE_PEND) {
+  mm->mm_scan_state = state;
+
+  if (state == MM_SCAN_STATE_PEND) {
     if (weight || mn->mn_idlescan) {
       if (!weight)
         mm->mm_scan_weight = SUBSCRIPTION_PRIO_SCAN_IDLE;
       TAILQ_REMOVE(&mn->mn_scan_pend, mm, mm_scan_link);
       TAILQ_INSERT_SORTED_R(&mn->mn_scan_pend, mpegts_mux_queue,
                             mm, mm_scan_link, mm_cmp);
-      gtimer_arm(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, 10);
+      mtimer_arm_rel(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, sec2mono(10));
       weight = 0;
     } else {
       mpegts_network_scan_queue_del(mm);
@@ -124,7 +136,7 @@ mpegts_network_scan_mux_done0
 
   if (result != MM_SCAN_NONE && mm->mm_scan_result != result) {
     mm->mm_scan_result = result;
-    mm->mm_config_save(mm);
+    idnode_changed(&mm->mm_id);
   }
 
   /* Re-enable? */
@@ -197,11 +209,11 @@ mpegts_network_scan_queue_del ( mpegts_mux_t *mm )
   }
   mpegts_mux_nice_name(mm, buf, sizeof(buf));
   mn->mn_display_name(mn, buf2, sizeof(buf2));
-  tvhdebug("mpegts", "%s - removing mux %s from scan queue", buf2, buf);
+  tvhdebug(LS_MPEGTS, "%s - removing mux %s from scan queue", buf2, buf);
   mm->mm_scan_state  = MM_SCAN_STATE_IDLE;
   mm->mm_scan_weight = 0;
-  gtimer_disarm(&mm->mm_scan_timeout);
-  gtimer_arm(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, 0);
+  mtimer_disarm(&mm->mm_scan_timeout);
+  mtimer_arm_rel(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, 0);
   mpegts_network_scan_notify(mm);
 }
 
@@ -235,7 +247,7 @@ mpegts_network_scan_queue_add
 
   mpegts_mux_nice_name(mm, buf, sizeof(buf));
   mn->mn_display_name(mn, buf2, sizeof(buf2));
-  tvhdebug("mpegts", "%s - adding mux %s to scan queue weight %d flags %04X",
+  tvhdebug(LS_MPEGTS, "%s - adding mux %s to scan queue weight %d flags %04X",
            buf2, buf, weight, flags);
 
   /* Add new entry */
@@ -245,7 +257,7 @@ mpegts_network_scan_queue_add
     mm->mm_scan_flags = SUBSCRIPTION_IDLESCAN;
   TAILQ_INSERT_SORTED_R(&mn->mn_scan_pend, mpegts_mux_queue,
                         mm, mm_scan_link, mm_cmp);
-  gtimer_arm(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, delay);
+  mtimer_arm_rel(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, sec2mono(delay));
   mpegts_network_scan_notify(mm);
 }
 
@@ -364,11 +376,11 @@ tsid_lookup:
         {
           char buf[256];
           mpegts_mux_nice_name(mm, buf, sizeof(buf));
-          tvhinfo("mpegts", "fastscan mux found '%s', set scan state 'PENDING'", buf);
+          tvhinfo(LS_MPEGTS, "fastscan mux found '%s', set scan state 'PENDING'", buf);
           mpegts_mux_scan_state_set(mm, MM_SCAN_STATE_PEND);
           return;
         }
-    tvhinfo("mpegts", "fastscan mux not found, position:%i, frequency:%i, polarisation:%c", satpos, freq, pol[0]);
+    tvhinfo(LS_MPEGTS, "fastscan mux not found, position:%i, frequency:%i, polarisation:%c", satpos, freq, pol[0]);
 
     // fastscan mux not found, try to add it automatically
     LIST_FOREACH(mn, &mpegts_network_all, mn_global_link)
@@ -392,12 +404,11 @@ tsid_lookup:
                                             MPEGTS_ONID_NONE,
                                             MPEGTS_TSID_NONE,
                                             mux, NULL, NULL);
-        if (mm)
-        {
-          mm->mm_config_save(mm);
+        if (mm) {
           char buf[256];
+          idnode_changed(&mm->mm_id);
           mn->mn_display_name(mn, buf, sizeof(buf));
-          tvhinfo("mpegts", "fastscan mux add to network '%s'", buf);
+          tvhinfo(LS_MPEGTS, "fastscan mux add to network '%s'", buf);
         }
         free(mux);
       }

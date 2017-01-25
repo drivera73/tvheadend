@@ -21,6 +21,7 @@
 #include "filebundle.h"
 #include "config.h"
 #include "scanfile.h"
+#include "memoryinfo.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -34,12 +35,26 @@
 #include <strings.h>
 #include <ctype.h>
 
-scanfile_region_list_t scanfile_regions_DVBC;
-scanfile_region_list_t scanfile_regions_DVBT;
-scanfile_region_list_t scanfile_regions_DVBS;
-scanfile_region_list_t scanfile_regions_ATSC_T;
-scanfile_region_list_t scanfile_regions_ATSC_C;
-scanfile_region_list_t scanfile_regions_ISDB_T;
+#define SCANFILE_LIMIT (64*1024*1024)
+
+static const char *scanfile_region_types[][2] = {
+  { "dvb-s", "dvbs" },
+  { "dvb-t", "dvbt" },
+  { "dvb-c", "dvbc" },
+  { "atsc-t", NULL  },
+  { "atsc-c", NULL  },
+  { "isdb-t", NULL  }
+};
+
+#define REGIONS ARRAY_SIZE(scanfile_region_types)
+
+static scanfile_region_list_t *scanfile_regions;
+static scanfile_region_list_t *scanfile_regions_load;
+static int64_t scanfile_total_load;
+static memoryinfo_t scanfile_memoryinfo = { .my_name = "Scan files" };
+
+static void scanfile_done_muxes( scanfile_network_t *net );
+
 
 /* **************************************************************************
  * Country codes
@@ -281,24 +296,25 @@ scanfile_region_create
 {
   scanfile_region_t *reg;
   scanfile_region_list_t *list = NULL;
-  if      (!strcmp(type, "dvb-s"))  list = &scanfile_regions_DVBS;
-  else if (!strcmp(type, "dvb-t"))  list = &scanfile_regions_DVBT;
-  else if (!strcmp(type, "dvb-c"))  list = &scanfile_regions_DVBC;
-  else if (!strcmp(type, "atsc-t")) list = &scanfile_regions_ATSC_T;
-  else if (!strcmp(type, "atsc-c")) list = &scanfile_regions_ATSC_C;
-  else if (!strcmp(type, "isdb-t")) list = &scanfile_regions_ISDB_T;
+  int i;
+  for (i = 0; i < REGIONS; i++)
+    if (strcmp(scanfile_regions_load[i].srl_type, type) == 0) {
+      list = &scanfile_regions_load[i];
+      break;
+    }
   if (!list) return NULL;
 
-  LIST_FOREACH(reg, list, sfr_link) {
+  LIST_FOREACH(reg, &list->srl_regions, sfr_link) {
     if (!strcmp(reg->sfr_id, id)) break;
   }
 
   if (!reg) {
-    tvhtrace("scanfile", "%s region %s created", type, id);
+    tvhtrace(LS_SCANFILE, "%s region %s created", type, id);
     reg = calloc(1, sizeof(scanfile_region_t));
+    memoryinfo_alloc(&scanfile_memoryinfo, sizeof(*reg) + strlen(id) + 1 + strlen(desc) + 1);
     reg->sfr_id   = strdup(id);
     reg->sfr_name = strdup(desc);
-    LIST_INSERT_SORTED(list, reg, sfr_link, scanfile_region_cmp);
+    LIST_INSERT_SORTED(&list->srl_regions, reg, sfr_link, scanfile_region_cmp);
   }
   
   return reg;
@@ -309,7 +325,8 @@ scanfile_region_create
  */
 static int
 scanfile_create_network
-  ( scanfile_network_t **_net, const char *type, const char *name,
+  ( scanfile_network_t **_net, const char *type,
+    const char *path, const char *name,
     dvb_fe_delivery_system_t delsys )
 {
   scanfile_region_t *reg = NULL;
@@ -355,8 +372,12 @@ scanfile_create_network
   }
   snprintf(buf2, sizeof(buf2), "%s_%s", type, buf);
   net = calloc(1, sizeof(scanfile_network_t));
+  memoryinfo_alloc(&scanfile_memoryinfo, sizeof(*net) + strlen(buf2) + 1 + strlen(buf) + 1 +
+                                                        strlen(path) + 1 + strlen(type) + 1);
   net->sfn_id   = strdup(buf2);
   net->sfn_name = strdup(buf);
+  net->sfn_path = strdup(path);
+  net->sfn_type = strdup(type);
   net->sfn_satpos = opos;
   LIST_INSERT_SORTED(&reg->sfr_networks, net, sfn_link, scanfile_network_cmp);
 
@@ -369,7 +390,8 @@ scanfile_create_network
  */
 static int
 scanfile_load_one
-  ( scanfile_network_t **net, const char *type, const char *name, const char *line )
+  ( scanfile_network_t **net, const char *type, const char *path,
+    const char *name, const char *line, int test )
 {
   int r = 1;
   dvb_mux_conf_t *mux = malloc(sizeof(dvb_mux_conf_t));
@@ -389,15 +411,22 @@ scanfile_load_one
       break;
   }
 
-  tvhtrace("scanfile", "[%s] %s", line, r ? "FAIL" : "OK");
+  tvhtrace(LS_SCANFILE, "[%s] %s", line, r ? "FAIL" : "OK");
   if (r) {
     free(mux);
   } else {
-    if (*net == NULL && scanfile_create_network(net, type, name, mux->dmc_fe_delsys)) {
+    if (*net == NULL &&
+        scanfile_create_network(net, type, path, name, mux->dmc_fe_delsys)) {
       free(mux);
       return -1;
     }
-    LIST_INSERT_HEAD(&(*net)->sfn_muxes, mux, dmc_link);
+    if (!test) {
+      memoryinfo_alloc(&scanfile_memoryinfo, sizeof(*mux));
+      LIST_INSERT_HEAD(&(*net)->sfn_muxes, mux, dmc_link);
+    } else {
+      free(mux);
+      return -1;
+    }
   }
   return 1;
 }
@@ -423,19 +452,20 @@ str_trim(char *s)
 }
 
 #define mux_fail0(r, text) do { \
-  tvhtrace("scanfile", text); \
+  tvhtrace(LS_SCANFILE, text); \
   ((r) = -1); \
 } while (0)
 #define mux_fail(r, text, val) do { \
-  tvhtrace("scanfile", text, val); \
+  tvhtrace(LS_SCANFILE, text, val); \
   ((r) = -1); \
 } while (0)
 #define mux_ok(r)   ((r) = ((r) > 0) ? 0 : (r))
 
 static int
 scanfile_load_dvbv5
-  ( scanfile_network_t **net, const char *type, const char *name,
-    char *line, fb_file *fp )
+  ( scanfile_network_t **net, const char *type,
+    const char *path, const char *name,
+    char *line, fb_file *fp, int test )
 {
   int res = 1, r = 1, i;
   char buf[256];
@@ -676,11 +706,17 @@ scanfile_load_dvbv5
     free(mux);
   } else {
     dvb_mux_conf_str(mux, buf, sizeof(buf));
-    tvhtrace("scanfile", "mux %s", buf);
+    tvhtrace(LS_SCANFILE, "mux %s", buf);
     if (*net == NULL)
-      if (scanfile_create_network(net, type, name, mux->dmc_fe_delsys))
+      if (scanfile_create_network(net, type, path, name, mux->dmc_fe_delsys))
         return -1;
-    LIST_INSERT_HEAD(&(*net)->sfn_muxes, mux, dmc_link);
+    if (!test) {
+      memoryinfo_alloc(&scanfile_memoryinfo, sizeof(*mux));
+      LIST_INSERT_HEAD(&(*net)->sfn_muxes, mux, dmc_link);
+    } else {
+      free(mux);
+      res = -2;
+    }
   }
 
   return res;
@@ -689,19 +725,21 @@ scanfile_load_dvbv5
 /*
  * Process a file
  */
-static void
+static scanfile_network_t *
 scanfile_load_file
-  ( const char *type, fb_dir *dir, const char *name )
+  ( scanfile_network_t *net, const char *type, const char *path,
+    fb_file *fp, const char *name, int test )
 {
-  fb_file *fp;
-  scanfile_network_t *net = NULL;
   char *str, buf[256];
   int load = 0;
 
-  tvhtrace("scanfile", "load file %s", name);
+  tvhtrace(LS_SCANFILE, "load file %s (processed bytes %"PRId64")",
+           name, scanfile_total_load);
 
-  fp = fb_open2(dir, name, 1, 0);
-  if (!fp) return;
+  if (!fp) return NULL;
+
+  scanfile_total_load += fb_size(fp);
+  if (scanfile_total_load > SCANFILE_LIMIT) goto end;
 
   /* Process file */
   load = 1;
@@ -725,16 +763,18 @@ scanfile_load_file
       case 'C':
       case 'T':
       case 'S':
-        load = scanfile_load_one(&net, type, name, buf);
+        load = scanfile_load_one(&net, type, path, name, buf, test);
         break;
       case '[':
-        load = scanfile_load_dvbv5(&net, type, name, buf, fp);
+        load = scanfile_load_dvbv5(&net, type, path, name, buf, fp, test);
         break;
       default:
         break;
     }
   }
+end:
   fb_close(fp);
+  return net;
 }
 
 /*
@@ -744,12 +784,15 @@ scanfile_load_file
  */
 static void
 scanfile_load_dir
-  ( const char *path, const char *type, int lvl )
+  ( const char *path, const char *type, int lvl, int test )
 {
-  char p[256];
+  char p[PATH_MAX];
   fb_dir *dir;
   fb_dirent *de;
-  tvhtrace("scanfile", "load dir %s", path);
+  fb_file *fp;
+  scanfile_network_t *net;
+
+  tvhtrace(LS_SCANFILE, "load dir %s", path);
 
   if (lvl >= 3) return;
   if (!(dir = fb_opendir(path))) return;
@@ -759,9 +802,13 @@ scanfile_load_dir
     if (*de->name == '.') continue;
     if (de->type == FB_DIR) {
       snprintf(p, sizeof(p), "%s/%s", path, de->name);
-      scanfile_load_dir(p, de->name, lvl+1);
+      scanfile_load_dir(p, de->name, lvl+1, test);
     } else if (type) {
-      scanfile_load_file(type, dir, de->name);
+      snprintf(p, sizeof(p), "%s/%s", path, de->name);
+      if (scanfile_total_load > SCANFILE_LIMIT) continue;
+      fp = fb_open2(dir, de->name, 1, 0);
+      net = scanfile_load_file(NULL, type, p, fp, de->name, test);
+      scanfile_done_muxes(net);
     }
   }
 
@@ -778,26 +825,78 @@ scanfile_stats(const char *what, scanfile_region_list_t *list)
   scanfile_network_t *sfn;
   int regions = 0, networks =0;
 
-  LIST_FOREACH(reg, list, sfr_link) {
+  LIST_FOREACH(reg, &list->srl_regions, sfr_link) {
     regions++;
     LIST_FOREACH(sfn, &reg->sfr_networks, sfn_link)
       networks++;
   }
   if (regions) {
-    tvhinfo("scanfile", "%s - loaded %i regions with %i networks", what, regions, networks);
+    tvhinfo(LS_SCANFILE, "%s - loaded %i regions with %i networks", what, regions, networks);
     return 1;
   }
   return 0;
 }
 
 /*
+ * Destroy the muxes
+ */
+static void
+scanfile_done_muxes( scanfile_network_t *net )
+{
+  dvb_mux_conf_t *mux;
+  if (!net) return;
+  while ((mux = LIST_FIRST(&net->sfn_muxes)) != NULL) {
+    memoryinfo_free(&scanfile_memoryinfo, sizeof(*mux));
+    LIST_REMOVE(mux, dmc_link);
+    free(mux);
+  }
+}
+
+
+/*
+ * Destroy the region
+ */
+static void
+scanfile_done_region( scanfile_region_list_t *list )
+{
+  scanfile_region_t *reg;
+  scanfile_network_t *net;
+
+  while ((reg = LIST_FIRST(&list->srl_regions)) != NULL) {
+    LIST_REMOVE(reg, sfr_link);
+    while ((net = LIST_FIRST(&reg->sfr_networks)) != NULL) {
+      LIST_REMOVE(net, sfn_link);
+      scanfile_done_muxes(net);
+      memoryinfo_free(&scanfile_memoryinfo, sizeof(*net) +
+                      (net->sfn_id ? strlen(net->sfn_id) + 1 : 0) +
+                      (net->sfn_name ? strlen(net->sfn_name) + 1 : 0) +
+                      (net->sfn_path ? strlen(net->sfn_path) + 1 : 0) +
+                      (net->sfn_type ? strlen(net->sfn_type) + 1 : 0));
+      free((void *)net->sfn_id);
+      free((void *)net->sfn_name);
+      free((void *)net->sfn_path);
+      free((void *)net->sfn_type);
+      free(net);
+    }
+    memoryinfo_free(&scanfile_memoryinfo, sizeof(*reg) +
+                    (reg->sfr_id ? strlen(reg->sfr_id) + 1 : 0) +
+                    (reg->sfr_name ? strlen(reg->sfr_name) + 1 : 0));
+    free((void *)reg->sfr_id);
+    free((void *)reg->sfr_name);
+    free(reg);
+  }
+}
+
+/*
  * Initialise the mux list
  */
 void
-scanfile_init ( void )
+scanfile_init ( const char *muxconf_path, int lock )
 {
-  const char *path = config.muxconf_path;
-  int r = 0;
+  static int initialized = 0;
+  const char *path = muxconf_path;
+  char buf[32], *p;
+  int r = 0, i;
   if (!path || !*path)
 #if ENABLE_DVBSCAN
     path = "data/dvb-scan";
@@ -806,63 +905,95 @@ scanfile_init ( void )
 #else
     path = "/usr/share/dvb";
 #endif
-  scanfile_load_dir(path, NULL, 0);
 
-  r += scanfile_stats("DVB-T",  &scanfile_regions_DVBT);
-  r += scanfile_stats("DVB-S",  &scanfile_regions_DVBS);
-  r += scanfile_stats("DVB-C",  &scanfile_regions_DVBC);
-  r += scanfile_stats("ATSC-T", &scanfile_regions_ATSC_T);
-  r += scanfile_stats("ATSC-C", &scanfile_regions_ATSC_C);
-  r += scanfile_stats("ISDB-T", &scanfile_regions_ISDB_T);
+  if (!initialized) {
+    if (lock)
+      pthread_mutex_lock(&global_lock);
+    memoryinfo_register(&scanfile_memoryinfo);
+    initialized = 1;
+    if (lock)
+      pthread_mutex_unlock(&global_lock);
+  }
+
+  scanfile_total_load = 0;
+  scanfile_regions_load = calloc(REGIONS, sizeof(scanfile_region_list_t));
+  memoryinfo_alloc(&scanfile_memoryinfo, REGIONS * sizeof(scanfile_region_list_t));
+  for (i = 0; i < REGIONS; i++) {
+    scanfile_regions_load[i].srl_type = scanfile_region_types[i][0];
+    scanfile_regions_load[i].srl_alt_type = scanfile_region_types[i][1];
+  }
+
+  scanfile_load_dir(path, NULL, 0, 1);
+
+  for (i = 0; i < REGIONS; i++) {
+    snprintf(buf, sizeof(buf)-1, "%s", scanfile_regions_load[i].srl_type);
+    buf[sizeof(buf)-1] = '\0';
+    for (p = buf; *p; p++) *p = toupper(*p);
+    r += scanfile_stats(buf, &scanfile_regions_load[i]);
+  }
   if (!r) {
-    tvhwarn("scanfile", "no predefined muxes found, check path '%s%s'",
+    tvhwarn(LS_SCANFILE, "no predefined muxes found, check path '%s%s'",
             path[0] == '/' ? path : TVHEADEND_DATADIR "/",
             path[0] == '/' ? "" : path);
-    tvhwarn("scanfile", "expected tree structure - http://git.linuxtv.org/cgit.cgi/dtv-scan-tables.git/tree/");
+    tvhwarn(LS_SCANFILE, "expected tree structure - http://git.linuxtv.org/cgit.cgi/dtv-scan-tables.git/tree/");
+    for (i = 0; i < REGIONS; i++)
+      scanfile_done_region(&scanfile_regions_load[i]);
+    memoryinfo_free(&scanfile_memoryinfo, REGIONS * sizeof(scanfile_region_list_t));
+    free(scanfile_regions_load);
+    scanfile_regions_load = NULL;
+  } else {
+    if (lock)
+      pthread_mutex_lock(&global_lock);
+    scanfile_done();
+    scanfile_regions = scanfile_regions_load;
+    scanfile_regions_load = NULL;
+    if (lock)
+      pthread_mutex_unlock(&global_lock);
   }
 }
 
 /*
  * Destroy the mux list
  */
-static void
-scanfile_done_region( scanfile_region_list_t *list )
-{
-  scanfile_region_t *reg;
-  scanfile_network_t *net;
-  dvb_mux_conf_t *mux;
-
-  while ((reg = LIST_FIRST(list)) != NULL) {
-    LIST_REMOVE(reg, sfr_link);
-    while ((net = LIST_FIRST(&reg->sfr_networks)) != NULL) {
-      LIST_REMOVE(net, sfn_link);
-      while ((mux = LIST_FIRST(&net->sfn_muxes)) != NULL) {
-        LIST_REMOVE(mux, dmc_link);
-        free(mux);
-      }
-      free((void *)net->sfn_id);
-      free((void *)net->sfn_name);
-      free(net);
-    }
-    free((void *)reg->sfr_id);
-    free((void *)reg->sfr_name);
-    free(reg);
-  }
-}
-
 void
 scanfile_done ( void )
 {
-  scanfile_done_region(&scanfile_regions_DVBS);
-  scanfile_done_region(&scanfile_regions_DVBT);
-  scanfile_done_region(&scanfile_regions_DVBC);
-  scanfile_done_region(&scanfile_regions_ATSC_T);
-  scanfile_done_region(&scanfile_regions_ATSC_C);
-  scanfile_done_region(&scanfile_regions_ISDB_T);
+  scanfile_region_list_t *l;
+  int i;
+
+  l = scanfile_regions;
+  scanfile_regions = NULL;
+  if (l) {
+    for (i = 0; i < REGIONS; i++)
+      scanfile_done_region(&l[i]);
+    memoryinfo_free(&scanfile_memoryinfo, REGIONS * sizeof(scanfile_region_list_t));
+    free(l);
+  }
 }
 
 /*
- * Find scanfile
+ * Find region list by type
+ */
+scanfile_region_list_t *
+scanfile_find_region_list ( const char *type )
+{
+  scanfile_region_list_t *list = NULL;
+  scanfile_region_list_t *ptr = scanfile_regions;
+  int i;
+  if (ptr == NULL)
+    return NULL;
+  for (i = 0; i < REGIONS; i++, ptr++) {
+    if (strcasecmp(ptr->srl_type, type) == 0 ||
+        (ptr->srl_alt_type && strcasecmp(ptr->srl_alt_type, type) == 0)) {
+      list = ptr;
+      break;
+    }
+  }
+  return list;
+}
+
+/*
+ * Find scanfile and load muxes
  */
 scanfile_network_t *
 scanfile_find ( const char *id )
@@ -871,30 +1002,20 @@ scanfile_find ( const char *id )
   scanfile_region_t *r = NULL;
   scanfile_network_t *n = NULL;
   scanfile_region_list_t *l;
+  fb_file *fp;
   tmp = strdup(id);
 
   /* Type */
   if (!(tok = strtok_r(tmp, "/", &s)))
     goto fail;
-  if (!strcasecmp(tok, "dvbt"))
-    l = &scanfile_regions_DVBT;
-  else if (!strcasecmp(tok, "dvbc"))
-    l = &scanfile_regions_DVBC;
-  else if (!strcasecmp(tok, "dvbs"))
-    l = &scanfile_regions_DVBS;
-  else if (!strcasecmp(tok, "atsc-t"))
-    l = &scanfile_regions_ATSC_T;
-  else if (!strcasecmp(tok, "atsc-c"))
-    l = &scanfile_regions_ATSC_C;
-  else if (!strcasecmp(tok, "isdb-t"))
-    l = &scanfile_regions_ISDB_T;
-  else
+  l = scanfile_find_region_list(tok);
+  if (!l)
     goto fail;
 
   /* Region */
   if (!(tok = strtok_r(NULL, "/", &s)))
     goto fail;
-  LIST_FOREACH(r, l, sfr_link)
+  LIST_FOREACH(r, &l->srl_regions, sfr_link)
     if (!strcmp(r->sfr_id, tok))
       break;
   if (!r) goto fail;
@@ -907,9 +1028,25 @@ scanfile_find ( const char *id )
       break;
 
   free(tmp);
+
+  if (n) {
+    fp = fb_open(n->sfn_path, 1, 0);
+    tmp = strrchr(n->sfn_path, '/');
+    scanfile_load_file(n, n->sfn_type, n->sfn_path, fp, tmp ?: n->sfn_path, 0);
+  }
+
   return n;
 
 fail:
   free(tmp);
   return NULL;
+}
+
+/*
+ * Remove muxes from scanfile
+ */
+void
+scanfile_clean( scanfile_network_t *sfn )
+{
+  scanfile_done_muxes(sfn);
 }

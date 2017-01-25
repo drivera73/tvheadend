@@ -64,7 +64,9 @@ typedef TAILQ_HEAD(mpegts_table_feed_queue, mpegts_table_feed)
 /* Classes */
 extern const idclass_t mpegts_network_class;
 extern const idclass_t mpegts_mux_class;
+extern const idclass_t mpegts_mux_instance_class;
 extern const idclass_t mpegts_service_class;
+extern const idclass_t mpegts_service_raw_class;
 extern const idclass_t mpegts_input_class;
 
 /* **************************************************************************
@@ -104,9 +106,9 @@ int mpegts_pid_del_group ( mpegts_apids_t *pids, mpegts_apids_t *vals );
 int mpegts_pid_find_windex ( mpegts_apids_t *pids, uint16_t pid, uint16_t weight );
 int mpegts_pid_find_rindex ( mpegts_apids_t *pids, uint16_t pid );
 static inline int mpegts_pid_wexists ( mpegts_apids_t *pids, uint16_t pid, uint16_t weight )
-  { return pids->all || mpegts_pid_find_windex(pids, pid, weight) >= 0; }
+  { return pids && (pids->all || mpegts_pid_find_windex(pids, pid, weight) >= 0); }
 static inline int mpegts_pid_rexists ( mpegts_apids_t *pids, uint16_t pid )
-  { return pids->all || mpegts_pid_find_rindex(pids, pid) >= 0; }
+  { return pids && (pids->all || mpegts_pid_find_rindex(pids, pid) >= 0); }
 int mpegts_pid_copy ( mpegts_apids_t *dst, mpegts_apids_t *src );
 int mpegts_pid_compare ( mpegts_apids_t *dst, mpegts_apids_t *src,
                          mpegts_apids_t *add, mpegts_apids_t *del );
@@ -281,6 +283,12 @@ struct mpegts_table_feed {
  * Logical network
  * *************************************************************************/
 
+typedef enum {
+  MN_DISCOVERY_DISABLE = 0,
+  MN_DISCOVERY_NEW     = 1,
+  MN_DISCOVERY_CHANGE  = 2
+} mpegts_discovery_t;
+
 /* Network/Input linkage */
 struct mpegts_network_link
 {
@@ -320,14 +328,14 @@ struct mpegts_network
    */
   mpegts_mux_queue_t mn_scan_pend;    // Pending muxes
   mpegts_mux_queue_t mn_scan_active;  // Active muxes
-  gtimer_t           mn_scan_timer;   // Timer for activity
+  mtimer_t           mn_scan_timer;   // Timer for activity
 
   /*
    * Functions
    */
   void              (*mn_delete)       (mpegts_network_t*, int delconf);
   void              (*mn_display_name) (mpegts_network_t*, char *buf, size_t len);
-  void              (*mn_config_save)  (mpegts_network_t*);
+  htsmsg_t *        (*mn_config_save)  (mpegts_network_t*, char *filename, size_t fsize);
   mpegts_mux_t*     (*mn_create_mux)
     (mpegts_network_t*, void *origin, uint16_t onid, uint16_t tsid,
      void *conf, int force);
@@ -363,11 +371,19 @@ typedef enum mpegts_mux_scan_result
   MM_SCAN_NONE,
   MM_SCAN_OK,
   MM_SCAN_FAIL,
-  MM_SCAN_PARTIAL
+  MM_SCAN_PARTIAL,
+  MM_SCAN_IGNORE,
 } mpegts_mux_scan_result_t;
 
 #define MM_SCAN_CHECK_OK(mm) \
   ((mm)->mm_scan_result == MM_SCAN_OK || (mm)->mm_scan_result == MM_SCAN_PARTIAL)
+
+enum mpegts_mux_enable
+{
+  MM_IGNORE  = -1,
+  MM_DISABLE =  0,
+  MM_ENABLE  =  1,
+};
 
 enum mpegts_mux_epg_flag
 {
@@ -384,7 +400,7 @@ enum mpegts_mux_epg_flag
   MM_EPG_ONLY_BULSATCOM_39E,
   MM_EPG_ONLY_PSIP,
 };
-#define MM_EPG_LAST MM_EPG_ONLY_OPENTV_SKY_AUSAT
+#define MM_EPG_LAST MM_EPG_ONLY_PSIP
 
 enum mpegts_mux_ac3_flag
 {
@@ -403,6 +419,7 @@ typedef struct tsdebug_packet {
 struct mpegts_mux
 {
   idnode_t mm_id;
+  int      mm_refcount;
 
   /*
    * Identification
@@ -413,9 +430,13 @@ struct mpegts_mux
   char                   *mm_provider_network_name;
   uint16_t                mm_onid;
   uint16_t                mm_tsid;
+  int                     mm_tsid_checks;
+  int                     mm_tsid_accept_zero_value;
+  tvhlog_limit_t          mm_tsid_loglimit;
+  int64_t                 mm_start_monoclock;
 
   int                     mm_update_pids_flag;
-  gtimer_t                mm_update_pids_timer;
+  mtimer_t                mm_update_pids_timer;
 
   /*
    * Services
@@ -431,7 +452,7 @@ struct mpegts_mux
   int                      mm_scan_weight;  ///< Scan priority
   int                      mm_scan_flags;   ///< Subscription flags
   int                      mm_scan_init;    ///< Flag to timeout handler
-  gtimer_t                 mm_scan_timeout; ///< Timer to handle timeout
+  mtimer_t                 mm_scan_timeout; ///< Timer to handle timeout
   TAILQ_ENTRY(mpegts_mux)  mm_scan_link;    ///< Link to Queue
   mpegts_mux_scan_state_t  mm_scan_state;   ///< Scanning state
 
@@ -443,7 +464,7 @@ struct mpegts_mux
   }                        mm_dmc_origin2;
 #endif
   void                    *mm_dmc_origin;
-  time_t                   mm_dmc_origin_expire;
+  int64_t                  mm_dmc_origin_expire;
 
   char                    *mm_fastscan_muxes;
 
@@ -487,7 +508,8 @@ struct mpegts_mux
    */
 
   void (*mm_delete)           (mpegts_mux_t *mm, int delconf);
-  void (*mm_config_save)      (mpegts_mux_t *mm);
+  void (*mm_free)             (mpegts_mux_t *mm);
+  htsmsg_t *(*mm_config_save) (mpegts_mux_t *mm, char *filename, size_t fsize);
   void (*mm_display_name)     (mpegts_mux_t*, char *buf, size_t len);
   int  (*mm_is_enabled)       (mpegts_mux_t *mm);
   void (*mm_stop)             (mpegts_mux_t *mm, int force, int reason);
@@ -589,12 +611,7 @@ struct mpegts_service
    * in order to recude load.
    */
   sbuf_t s_tsbuf;
-  time_t s_tsbuf_last;
-
-  /**
-   * Average continuity errors
-   */
-  avgstat_t s_cc_errors;
+  int64_t s_tsbuf_last;
 
   /**
    * PCR drift compensation. This should really be per-packet.
@@ -638,6 +655,12 @@ struct mpegts_mux_sub
   int                       mms_weight;
 };
 
+enum mpegts_input_is_enabled {
+  MI_IS_ENABLED_RETRY = -1,
+  MI_IS_ENABLED_NEVER = 0,
+  MI_IS_ENABLED_OK = 1,
+};
+
 /* Input source */
 struct mpegts_input
 {
@@ -670,21 +693,24 @@ struct mpegts_input
   /*
    * Status
    */
-  gtimer_t mi_status_timer;
+  mtimer_t mi_status_timer;
 
   /*
    * Input processing
    */
 
-  uint8_t mi_running;            /* threads running */
-  time_t mi_last_dispatch;
+  int mi_running;            /* threads running */
+  int64_t mi_last_dispatch;
 
   /* Data input */
   // Note: this section is protected by mi_input_lock
   pthread_t                       mi_input_tid;
+  mtimer_t                        mi_input_thread_start;
   pthread_mutex_t                 mi_input_lock;
-  pthread_cond_t                  mi_input_cond;
+  tvh_cond_t                      mi_input_cond;
   TAILQ_HEAD(,mpegts_packet)      mi_input_queue;
+  uint64_t                        mi_input_queue_size;
+  tvhlog_limit_t                  mi_input_queue_loglimit;
 
   /* Data processing/output */
   // Note: this lock (mi_output_lock) protects all the remaining
@@ -696,8 +722,10 @@ struct mpegts_input
 
   /* Table processing */
   pthread_t                       mi_table_tid;
-  pthread_cond_t                  mi_table_cond;
+  tvh_cond_t                      mi_table_cond;
   mpegts_table_feed_queue_t       mi_table_queue;
+  uint64_t                        mi_table_queue_size;
+  tvhlog_limit_t                  mi_table_queue_loglimit;
 
   /* DBus */
 #if ENABLE_DBUS_1
@@ -707,10 +735,10 @@ struct mpegts_input
   /*
    * Functions
    */
-  int  (*mi_is_enabled)     (mpegts_input_t*, mpegts_mux_t *mm, int flags);
+  int  (*mi_is_enabled)     (mpegts_input_t*, mpegts_mux_t *mm, int flags, int weight);
   void (*mi_enabled_updated)(mpegts_input_t*);
   void (*mi_display_name)   (mpegts_input_t*, char *buf, size_t len);
-  int  (*mi_get_weight)     (mpegts_input_t*, mpegts_mux_t *mm, int flags);
+  int  (*mi_get_weight)     (mpegts_input_t*, mpegts_mux_t *mm, int flags, int weight);
   int  (*mi_get_priority)   (mpegts_input_t*, mpegts_mux_t *mm, int flags);
   int  (*mi_get_grace)      (mpegts_input_t*, mpegts_mux_t *mm);
   int  (*mi_warm_mux)       (mpegts_input_t*,mpegts_mux_instance_t*);
@@ -780,7 +808,7 @@ void mpegts_input_status_timer ( void *p );
 
 int mpegts_input_grace ( mpegts_input_t * mi, mpegts_mux_t * mm );
 
-int mpegts_input_is_enabled ( mpegts_input_t * mi, mpegts_mux_t *mm, int flags );
+int mpegts_input_is_enabled ( mpegts_input_t * mi, mpegts_mux_t *mm, int flags, int weight );
 
 void mpegts_input_set_enabled ( mpegts_input_t *mi, int enabled );
 
@@ -822,7 +850,7 @@ static inline mpegts_network_t *mpegts_network_find(const char *uuid)
   { return idnode_find(uuid, &mpegts_network_class, NULL); }
 
 mpegts_mux_t *mpegts_network_find_mux
-  (mpegts_network_t *mn, uint16_t onid, uint16_t tsid);
+  (mpegts_network_t *mn, uint16_t onid, uint16_t tsid, int check);
 
 void mpegts_network_class_delete ( const idclass_t *idc, int delconf );
 
@@ -857,6 +885,25 @@ static inline mpegts_mux_t *mpegts_mux_find(const char *uuid)
   { mpegts_mux_t *mm = mpegts_mux_find(u); if (mm) mm->mm_delete(mm, delconf); }
 
 void mpegts_mux_delete ( mpegts_mux_t *mm, int delconf );
+
+void mpegts_mux_free ( mpegts_mux_t *mm );
+
+static inline void mpegts_mux_grab ( mpegts_mux_t *mm )
+{
+  int v = atomic_add(&mm->mm_refcount, 1);
+  assert(v > 0);
+}
+
+static inline int mpegts_mux_release ( mpegts_mux_t *mm )
+{
+  int v = atomic_dec(&mm->mm_refcount, 1);
+  assert(v > 0);
+  if (v == 1) {
+    mm->mm_free(mm);
+    return 1;
+  }
+  return 0;
+}
 
 void mpegts_mux_save ( mpegts_mux_t *mm, htsmsg_t *c );
 
@@ -921,13 +968,16 @@ mpegts_mux_find_pid(mpegts_mux_t *mm, int pid, int create)
 
 void mpegts_mux_update_pids ( mpegts_mux_t *mm );
 
+int mpegts_mux_compare ( mpegts_mux_t *a, mpegts_mux_t *b );
+
 void mpegts_input_recv_packets
   (mpegts_input_t *mi, mpegts_mux_instance_t *mmi, sbuf_t *sb,
    int flags, mpegts_pcr_t *pcr);
 
-int mpegts_input_get_weight ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags );
+int mpegts_input_get_weight ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags, int weight );
 int mpegts_input_get_priority ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags );
 int mpegts_input_get_grace ( mpegts_input_t *mi, mpegts_mux_t *mm );
+int mpegts_input_warm_mux ( mpegts_input_t *mi, mpegts_mux_instance_t *mmi );
 
 void mpegts_input_save ( mpegts_input_t *mi, htsmsg_t *c );
 
@@ -948,7 +998,7 @@ tsdebug_write(mpegts_mux_t *mm, uint8_t *buf, size_t len)
 #if ENABLE_TSDEBUG
   if (mm && mm->mm_tsdebug_fd2 >= 0)
     if (write(mm->mm_tsdebug_fd2, buf, len) != len)
-      tvherror("tsdebug", "unable to write input data (%i)", errno);
+      tvherror(LS_TSDEBUG, "unable to write input data (%i)", errno);
 #endif
 }
 
@@ -991,7 +1041,7 @@ int mpegts_table_type
 mpegts_table_t *mpegts_table_add
   (mpegts_mux_t *mm, int tableid, int mask,
    mpegts_table_callback_t callback, void *opaque,
-   const char *name, int flags, int pid, int weight);
+   const char *name, int subsys, int flags, int pid, int weight);
 void mpegts_table_flush_all
   (mpegts_mux_t *mm);
 void mpegts_table_destroy ( mpegts_table_t *mt );

@@ -39,7 +39,8 @@
 #include "tcp.h"
 
 static pthread_mutex_t comet_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t comet_cond = PTHREAD_COND_INITIALIZER;
+static tvh_cond_t comet_cond;
+static int comet_waiting;
 
 #define MAILBOX_UNUSED_TIMEOUT      20
 #define MAILBOX_EMPTY_REPLY_TIMEOUT 10
@@ -57,7 +58,7 @@ typedef struct comet_mailbox {
   char *cmb_boxid; /* SHA-1 hash */
   char *cmb_lang;  /* UI language */
   htsmsg_t *cmb_messages; /* A vector */
-  time_t cmb_last_used;
+  int64_t cmb_last_used;
   LIST_ENTRY(comet_mailbox) cmb_link;
   int cmb_debug;
 } comet_mailbox_t;
@@ -95,7 +96,7 @@ comet_flush(void)
   for(cmb = LIST_FIRST(&mailboxes); cmb != NULL; cmb = next) {
     next = LIST_NEXT(cmb, cmb_link);
 
-    if(cmb->cmb_last_used && cmb->cmb_last_used + 60 < dispatch_clock)
+    if(cmb->cmb_last_used && cmb->cmb_last_used + sec2mono(60) < mclk())
       cmb_destroy(cmb);
   }
   pthread_mutex_unlock(&comet_mutex);
@@ -131,7 +132,7 @@ comet_mailbox_create(const char *lang)
 
   cmb->cmb_boxid = strdup(id);
   cmb->cmb_lang = lang ? strdup(lang) : NULL;
-  time(&cmb->cmb_last_used);
+  cmb->cmb_last_used = mclk();
   mailbox_tally++;
 
   LIST_INSERT_HEAD(&mailboxes, cmb, cmb_link);
@@ -147,7 +148,7 @@ comet_access_update(http_connection_t *hc, comet_mailbox_t *cmb)
   extern int access_noacl;
 
   htsmsg_t *m = htsmsg_create_map();
-  const char *username = hc->hc_access ? (hc->hc_access->aa_username ?: "") : "";
+  const char *username = "";
   int64_t bfree, bused, btotal;
   int dvr = !http_access_verify(hc, ACCESS_RECORDER);
   int admin = !http_access_verify(hc, ACCESS_ADMIN);
@@ -155,17 +156,22 @@ comet_access_update(http_connection_t *hc, comet_mailbox_t *cmb)
 
   htsmsg_add_str(m, "notificationClass", "accessUpdate");
 
-  switch (hc->hc_access->aa_uilevel) {
-  case UILEVEL_BASIC:    s = "basic";    break;
-  case UILEVEL_ADVANCED: s = "advanced"; break;
-  case UILEVEL_EXPERT:   s = "expert";   break;
-  default:               s = NULL;       break;
+  if (hc->hc_access) {
+    username = hc->hc_access->aa_username ?: "";
+
+    switch (hc->hc_access->aa_uilevel) {
+    case UILEVEL_BASIC:    s = "basic";    break;
+    case UILEVEL_ADVANCED: s = "advanced"; break;
+    case UILEVEL_EXPERT:   s = "expert";   break;
+    default:               s = NULL;       break;
+    }
+    if (s) {
+      htsmsg_add_str(m, "uilevel", s);
+      if (config.uilevel_nochange)
+        htsmsg_add_u32(m, "uilevel_nochange", config.uilevel_nochange);
+    }
   }
-  if (s) {
-    htsmsg_add_str(m, "uilevel", s);
-    if (config.uilevel_nochange)
-      htsmsg_add_u32(m, "uilevel_nochange", config.uilevel_nochange);
-  }
+  htsmsg_add_str(m, "theme", access_get_theme(hc->hc_access));
   htsmsg_add_u32(m, "quicktips", config.ui_quicktips);
   if (!access_noacl)
     htsmsg_add_str(m, "username", username);
@@ -236,18 +242,17 @@ comet_mailbox_poll(http_connection_t *hc, const char *remain, void *opaque)
   comet_mailbox_t *cmb = NULL; 
   const char *cometid = http_arg_get(&hc->hc_req_args, "boxid");
   const char *immediate = http_arg_get(&hc->hc_req_args, "immediate");
-  int im = immediate ? atoi(immediate) : 0;
-  time_t reqtime;
-  struct timespec ts;
+  int im = immediate ? atoi(immediate) : 0, e;
+  int64_t mono;
   htsmsg_t *m;
 
   if(!im)
-    usleep(100000); /* Always sleep 0.1 sec to avoid comet storms */
+    tvh_safe_usleep(100000); /* Always sleep 0.1 sec to avoid comet storms */
 
   pthread_mutex_lock(&comet_mutex);
-  if (!comet_running) {
+  if (!atomic_get(&comet_running)) {
     pthread_mutex_unlock(&comet_mutex);
-    return 400;
+    return HTTP_STATUS_BAD_REQUEST;
   }
 
   if(cometid != NULL)
@@ -260,16 +265,18 @@ comet_mailbox_poll(http_connection_t *hc, const char *remain, void *opaque)
     comet_access_update(hc, cmb);
     comet_serverIpPort(hc, cmb);
   }
-  time(&reqtime);
-
-  ts.tv_sec = reqtime + 10;
-  ts.tv_nsec = 0;
-
   cmb->cmb_last_used = 0; /* Make sure we're not flushed out */
 
   if(!im && cmb->cmb_messages == NULL) {
-    pthread_cond_timedwait(&comet_cond, &comet_mutex, &ts);
-    if (!comet_running) {
+    mono = mclk() + sec2mono(10);
+    comet_waiting++;
+    do {
+      e = tvh_cond_timedwait(&comet_cond, &comet_mutex, mono);
+      if (e == ETIMEDOUT)
+        break;
+    } while (ERRNO_AGAIN(e));
+    comet_waiting--;
+    if (!atomic_get(&comet_running)) {
       pthread_mutex_unlock(&comet_mutex);
       return 400;
     }
@@ -280,7 +287,7 @@ comet_mailbox_poll(http_connection_t *hc, const char *remain, void *opaque)
   htsmsg_add_msg(m, "messages", cmb->cmb_messages ?: htsmsg_create_list());
   cmb->cmb_messages = NULL;
   
-  cmb->cmb_last_used = dispatch_clock;
+  cmb->cmb_last_used = mclk();
 
   pthread_mutex_unlock(&comet_mutex);
 
@@ -320,7 +327,7 @@ comet_mailbox_dbg(http_connection_t *hc, const char *remain, void *opaque)
       htsmsg_add_str(m, "logtxt", buf);
       htsmsg_add_msg(cmb->cmb_messages, NULL, m);
 
-      pthread_cond_broadcast(&comet_cond);
+      tvh_cond_signal(&comet_cond, 1);
     }
   }
   pthread_mutex_unlock(&comet_mutex);
@@ -336,7 +343,9 @@ void
 comet_init(void)
 {
   pthread_mutex_lock(&comet_mutex);
-  comet_running = 1;
+  tvh_cond_init(&comet_cond);
+  atomic_set(&comet_running, 1);
+  comet_waiting = 0;
   pthread_mutex_unlock(&comet_mutex);
   http_path_add("/comet/poll",  NULL, comet_mailbox_poll, ACCESS_WEB_INTERFACE);
   http_path_add("/comet/debug", NULL, comet_mailbox_dbg,  ACCESS_WEB_INTERFACE);
@@ -346,12 +355,24 @@ void
 comet_done(void)
 {
   comet_mailbox_t *cmb;
+  int waiting;
 
   pthread_mutex_lock(&comet_mutex);
-  comet_running = 0;
+  atomic_set(&comet_running, 0);
   while ((cmb = LIST_FIRST(&mailboxes)) != NULL)
     cmb_destroy(cmb);
+  tvh_cond_signal(&comet_cond, 1);
   pthread_mutex_unlock(&comet_mutex);
+
+  waiting = 1;
+  while (waiting) {
+    pthread_mutex_lock(&comet_mutex);
+    waiting = comet_waiting;
+    pthread_mutex_unlock(&comet_mutex);
+  }
+
+  tvh_cond_destroy(&comet_cond);
+
 }
 
 /**
@@ -387,9 +408,12 @@ comet_mailbox_add_message(htsmsg_t *m, int isdebug, int rewrite)
   comet_mailbox_t *cmb;
   htsmsg_t *e;
 
+  if (!atomic_get(&comet_running))
+    return;
+
   pthread_mutex_lock(&comet_mutex);
 
-  if (comet_running) {
+  if (atomic_get(&comet_running)) {
     LIST_FOREACH(cmb, &mailboxes, cmb_link) {
 
       if(isdebug && !cmb->cmb_debug)
@@ -402,8 +426,8 @@ comet_mailbox_add_message(htsmsg_t *m, int isdebug, int rewrite)
         comet_mailbox_rewrite_msg(rewrite, e, cmb->cmb_lang);
       htsmsg_add_msg(cmb->cmb_messages, NULL, e);
     }
+    tvh_cond_signal(&comet_cond, 1);
   }
 
-  pthread_cond_broadcast(&comet_cond);
   pthread_mutex_unlock(&comet_mutex);
 }

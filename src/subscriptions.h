@@ -57,6 +57,15 @@ extern struct th_subscription_list subscriptions;
 #define UNSUBSCRIBE_QUIET     0x01
 #define UNSUBSCRIBE_FINAL     0x02
 
+/* States */
+typedef enum {
+  SUBSCRIPTION_IDLE,
+  SUBSCRIPTION_TESTING_SERVICE,
+  SUBSCRIPTION_GOT_SERVICE,
+  SUBSCRIPTION_BAD_SERVICE,
+  SUBSCRIPTION_ZOMBIE
+} ths_state_t;
+
 typedef struct th_subscription {
 
   int ths_id;
@@ -68,17 +77,11 @@ typedef struct th_subscription {
 
   int ths_weight;
 
-  enum {
-    SUBSCRIPTION_IDLE,
-    SUBSCRIPTION_TESTING_SERVICE,
-    SUBSCRIPTION_GOT_SERVICE,
-    SUBSCRIPTION_BAD_SERVICE,
-    SUBSCRIPTION_ZOMBIE
-  } ths_state;
+  int ths_state;
 
   int ths_testing_error;
 
-  gtimer_t ths_remove_timer;
+  mtimer_t ths_remove_timer;
 
   LIST_ENTRY(th_subscription) ths_channel_link;
   struct channel *ths_channel;          /* May be NULL if channel has been
@@ -108,7 +111,7 @@ typedef struct th_subscription {
   int ths_flags;
   int ths_timeout;
 
-  time_t ths_last_find;
+  int64_t ths_last_find;
   int ths_last_error;
 
   streaming_message_t *ths_start_message;
@@ -127,8 +130,8 @@ typedef struct th_subscription {
   /**
    * Postpone
    */
-  int    ths_postpone;
-  time_t ths_postpone_end;
+  int     ths_postpone;
+  int64_t ths_postpone_end;
 
   /*
    * MPEG-TS mux chain
@@ -193,7 +196,7 @@ subscription_create_from_mux(struct profile_chain *prch,
 
 th_subscription_t *subscription_create(struct profile_chain *prch,
                                        int weight, const char *name,
-				       int flags, st_callback_t *cb,
+				       int flags, streaming_ops_t *ops,
 				       const char *hostname,
 				       const char *username,
 				       const char *client);

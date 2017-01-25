@@ -19,6 +19,7 @@
 #include <ctype.h>
 #include "tvheadend.h"
 #include "caclient.h"
+#include "descrambler.h"
 #include "service.h"
 #include "input.h"
 
@@ -58,7 +59,7 @@ dvbcam_register_cam(linuxdvb_ca_t * lca, uint8_t slot, uint16_t * caids,
 {
   dvbcam_active_cam_t *ac;
 
-  tvhtrace("dvbcam", "register cam ca %p slot %u num_caids %u",
+  tvhtrace(LS_DVBCAM, "register cam ca %p slot %u num_caids %u",
            lca, slot, num_caids);
 
   num_caids = MIN(CAIDS_PER_CA_SLOT, num_caids);
@@ -84,7 +85,7 @@ dvbcam_unregister_cam(linuxdvb_ca_t * lca, uint8_t slot)
   dvbcam_active_cam_t *ac, *ac_tmp;
   dvbcam_active_service_t *as;
 
-  tvhtrace("dvbcam", "unregister cam lca %p slot %u", lca, slot);
+  tvhtrace(LS_DVBCAM, "unregister cam lca %p slot %u", lca, slot);
 
   pthread_mutex_lock(&dvbcam_mutex);
 
@@ -132,7 +133,7 @@ dvbcam_pmt_data(mpegts_service_t *s, const uint8_t *ptr, int len)
     }
 
   if (!as) {
-    tvhtrace("dvbcam", "cannot find active service entry");
+    tvhtrace(LS_DVBCAM, "cannot find active service entry");
   	goto done;
   }
 
@@ -148,7 +149,7 @@ dvbcam_pmt_data(mpegts_service_t *s, const uint8_t *ptr, int len)
   /*if this is update just send updated CAPMT to CAM */
   if (is_update) {
 
-    tvhtrace("dvbcam", "CAPMT sent to CAM (update)");
+    tvhtrace(LS_DVBCAM, "CAPMT sent to CAM (update)");
     list_mgmt = CA_LIST_MANAGEMENT_UPDATE;
     goto enqueue;
   }
@@ -174,10 +175,10 @@ dvbcam_pmt_data(mpegts_service_t *s, const uint8_t *ptr, int len)
 end_of_search_for_cam:
 
   if (!ac) {
-    tvhtrace("dvbcam", "cannot find active cam entry");
+    tvhtrace(LS_DVBCAM, "cannot find active cam entry");
     goto done;
   }
-  tvhtrace("dvbcam", "found active cam entry");
+  tvhtrace(LS_DVBCAM, "found active cam entry");
 
   if (ac->active_programs++)
     list_mgmt = CA_LIST_MANAGEMENT_ADD;
@@ -185,9 +186,13 @@ end_of_search_for_cam:
     list_mgmt = CA_LIST_MANAGEMENT_ONLY;
 
 enqueue:
-  if (as->ca)
+  if (as->ca) {
+    pthread_mutex_lock(&s->s_stream_mutex);
+    descrambler_external((service_t *)s, 1);
+    pthread_mutex_unlock(&s->s_stream_mutex);
     linuxdvb_ca_enqueue_capmt(as->ca, as->slot, as->last_pmt, as->last_pmt_len,
                               list_mgmt, CA_PMT_CMD_ID_OK_DESCRAMBLING);
+  }
 done:
   pthread_mutex_unlock(&dvbcam_mutex);
 }
@@ -197,7 +202,7 @@ dvbcam_service_start(service_t *t)
 {
   dvbcam_active_service_t *as;
 
-  tvhtrace("dvbcam", "start service %p", t);
+  tvhtrace(LS_DVBCAM, "start service %p", t);
 
   TAILQ_FOREACH(as, &dvbcam_active_services, link)
     if (as->t == t)
@@ -223,7 +228,7 @@ dvbcam_service_stop(service_t *t)
   dvbcam_active_cam_t *ac2;
   uint8_t slot = -1;
 
-  tvhtrace("dvbcam", "stop service %p", t);
+  tvhtrace(LS_DVBCAM, "stop service %p", t);
 
   pthread_mutex_lock(&dvbcam_mutex);
 

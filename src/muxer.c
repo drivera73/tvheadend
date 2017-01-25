@@ -24,6 +24,7 @@
 #include "muxer.h"
 #include "muxer/muxer_mkv.h"
 #include "muxer/muxer_pass.h"
+#include "muxer/muxer_audioes.h"
 #if CONFIG_LIBAV
 #include "muxer/muxer_libav.h"
 #endif
@@ -45,6 +46,11 @@ static struct strtab container_audio_mime[] = {
   { "audio/webm",               MC_AVWEBM },
   { "audio/mp2t",               MC_MPEGTS },
   { "audio/mpeg",               MC_MPEGPS },
+  { "audio/mpeg",               MC_MPEG2AUDIO },
+  { "audio/ac3",                MC_AC3 },
+  { "audio/aac",                MC_AAC },
+  { "audio/mp4",                MC_MP4A },
+  { "audio/ogg",                MC_VORBIS },
   { "audio/mp4",                MC_AVMP4 },
   { "application/octet-stream", MC_PASS },
   { "application/octet-stream", MC_RAW },
@@ -82,6 +88,11 @@ static struct strtab container_name[] = {
   { "avmatroska", MC_AVMATROSKA },
   { "avwebm",     MC_AVWEBM },
   { "avmp4",      MC_AVMP4 },
+  { "mp2",        MC_MPEG2AUDIO },
+  { "ac3",        MC_AC3 },
+  { "aac",        MC_AAC },
+  { "mp4a",       MC_MP4A },
+  { "oga",        MC_VORBIS },
 };
 
 
@@ -99,6 +110,11 @@ static struct strtab container_audio_file_suffix[] = {
   { "mka",  MC_AVMATROSKA },
   { "webm", MC_AVWEBM },
   { "mp4",  MC_AVMP4 },
+  { "mp2",  MC_MPEG2AUDIO },
+  { "ac3",  MC_AC3 },
+  { "aac",  MC_AAC },
+  { "mp4a", MC_MP4A },
+  { "oga",  MC_VORBIS },
 };
 
 
@@ -255,14 +271,17 @@ muxer_create(const muxer_config_t *m_cfg)
   if(!m)
     m = mkv_muxer_create(m_cfg);
 
+  if(!m)
+    m = audioes_muxer_create(m_cfg);
+
 #if CONFIG_LIBAV
   if(!m)
     m = lav_muxer_create(m_cfg);
 #endif
 
   if(!m) {
-    tvhlog(LOG_ERR, "mux", "Can't find a muxer that supports '%s' container",
-	   muxer_container_type2txt(m_cfg->m_type));
+    tvherror(LS_MUXER, "Can't find a muxer that supports '%s' container",
+	    muxer_container_type2txt(m_cfg->m_type));
     return NULL;
   }
   

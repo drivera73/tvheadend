@@ -86,16 +86,20 @@ linuxdvb_rotor_class_get_title ( idnode_t *o, const char *lang )
 
 extern const idclass_t linuxdvb_diseqc_class;
 
+CLASS_DOC(linuxdvb_satconf)
+
 const idclass_t linuxdvb_rotor_class = {
   .ic_super       = &linuxdvb_diseqc_class,
   .ic_class       = "linuxdvb_rotor",
-  .ic_caption     = N_("DiseqC rotor"),
+  .ic_doc         = tvh_doc_linuxdvb_satconf_class,
+  .ic_caption     = N_("TV Adapters - SatConfig - DiseqC Rotor"),
   .ic_get_title   = linuxdvb_rotor_class_get_title,
   .ic_properties  = (const property_t[]) {
     {
       .type    = PT_U32,
       .id      = "powerup_time",
       .name    = N_("Power-up time (ms) (15-200)"),
+      .desc    = N_("Time (in milliseconds) for the rotor to power up."),
       .off     = offsetof(linuxdvb_rotor_t, lr_powerup_time),
       .def.u32 = 100,
     },
@@ -103,6 +107,7 @@ const idclass_t linuxdvb_rotor_class = {
       .type    = PT_U32,
       .id      = "cmd_time",
       .name    = N_("Command time (ms) (10-100)"),
+      .desc    = N_("Time (in milliseconds) for a command to complete."),
       .off     = offsetof(linuxdvb_rotor_t, lr_cmd_time),
       .def.u32 = 25
     },
@@ -114,18 +119,20 @@ const idclass_t linuxdvb_rotor_gotox_class =
 {
   .ic_super       = &linuxdvb_rotor_class,
   .ic_class       = "linuxdvb_rotor_gotox",
-  .ic_caption     = N_("GOTOX rotor"),
+  .ic_caption     = N_("TV Adapters - SatConfig - GOTOX Rotor"),
   .ic_properties  = (const property_t[]) {
     {
       .type   = PT_U16,
       .id     = "position",
       .name   = N_("GOTOX position"),
+      .desc   = N_("Satellite position."),
       .off    = offsetof(linuxdvb_rotor_t, lr_position),
     },
     {
       .type   = PT_DBL,
       .id     = "sat_lon",
       .name   = N_("Satellite longitude"),
+      .desc   = N_("Satellite longitude."),
       .off    = offsetof(linuxdvb_rotor_t, lr_sat_lon),
     },
     {}
@@ -136,12 +143,13 @@ const idclass_t linuxdvb_rotor_usals_class =
 {
   .ic_super       = &linuxdvb_rotor_class,
   .ic_class       = "linuxdvb_rotor_usals",
-  .ic_caption     = N_("USALS rotor"),
+  .ic_caption     = N_("TV Adapters - SatConfig - USALS Rotor"),
   .ic_properties  = (const property_t[]) {
     {
       .type   = PT_DBL,
       .id     = "sat_lon",
       .name   = N_("Satellite longitude"),
+      .desc   = N_("Satellite longitude."),
       .off    = offsetof(linuxdvb_rotor_t, lr_sat_lon),
     },
  
@@ -253,7 +261,7 @@ sat_angle( linuxdvb_rotor_t *lr, linuxdvb_satconf_ele_t *ls )
   double azimuth, elevation;
 
 #ifndef ROTOR_TEST
-  tvhtrace("diseqc", "site: lat %.4f, lon %.4f, alt %.4f; sat lon %.4f",
+  tvhtrace(LS_DISEQC, "site: lat %.4f, lon %.4f, alt %.4f; sat lon %.4f",
                      site_lat, site_lon, site_alt, sat_lon);
 #endif
 
@@ -261,7 +269,7 @@ sat_angle( linuxdvb_rotor_t *lr, linuxdvb_satconf_ele_t *ls )
                             &azimuth, &elevation);
 
 #ifndef ROTOR_TEST
-  tvhtrace("diseqc", "rotor angle azimuth %.4f elevation %.4f", azimuth, elevation);
+  tvhtrace(LS_DISEQC, "rotor angle azimuth %.4f elevation %.4f", azimuth, elevation);
 #else
   gazimuth = azimuth;
   gelevation = elevation;
@@ -358,7 +366,7 @@ linuxdvb_rotor_check_orbital_pos
     pos = -(pos);
     dir = 'W';
   }
-  tvhdebug("diseqc", "rotor already positioned to %i.%i%c",
+  tvhdebug(LS_DISEQC, "rotor already positioned to %i.%i%c",
                      pos / 10, pos % 10, dir);
   return 1;
 }
@@ -373,13 +381,13 @@ linuxdvb_rotor_gotox_tune
 
   for (i = 0; i <= ls->lse_parent->ls_diseqc_repeats; i++) {
     if (linuxdvb_diseqc_send(fd, 0xE0, 0x31, 0x6B, 1, (int)lr->lr_position)) {
-      tvherror("diseqc", "failed to set GOTOX pos %d", lr->lr_position);
+      tvherror(LS_DISEQC, "failed to set GOTOX pos %d", lr->lr_position);
       return -1;
     }
-    usleep(MINMAX(lr->lr_cmd_time, 10, 100) * 1000);
+    tvh_safe_usleep(MINMAX(lr->lr_cmd_time, 10, 100) * 1000);
   }
 
-  tvhdebug("diseqc", "rotor GOTOX pos %d sent", lr->lr_position);
+  tvhdebug(LS_DISEQC, "rotor GOTOX pos %d sent", lr->lr_position);
 
   return linuxdvb_rotor_grace((linuxdvb_diseqc_t*)lr,lm);
 }
@@ -402,17 +410,17 @@ linuxdvb_rotor_usals_tune
   }
   cmd |= (angle / 10) * 0x10 + xtable[angle % 10];
 
-  tvhdebug("diseqc", "rotor USALS goto %0.1f%c (motor %0.1f %sclockwise)",
+  tvhdebug(LS_DISEQC, "rotor USALS goto %0.1f%c (motor %0.1f %sclockwise)",
            fabs(lr->lr_sat_lon), (lr->lr_sat_lon > 0.0) ? 'E' : 'W',
            ((double)angle / 10.0), (cmd & 0xF000) == 0xD000 ? "counter-" : "");
 
   for (i = 0; i <= lsp->ls_diseqc_repeats; i++) {
     if (linuxdvb_diseqc_send(fd, 0xE0, 0x31, 0x6E, 2,
                              (cmd >> 8) & 0xff, cmd & 0xff)) {
-      tvherror("diseqc", "failed to send USALS command");
+      tvherror(LS_DISEQC, "failed to send USALS command");
       return -1;
     }
-    usleep(MINMAX(lr->lr_cmd_time, 10, 100) * 1000);
+    tvh_safe_usleep(MINMAX(lr->lr_cmd_time, 10, 100) * 1000);
   }
 
   return linuxdvb_rotor_grace((linuxdvb_diseqc_t*)lr,lm);
@@ -475,9 +483,9 @@ linuxdvb_rotor_list ( void *o, const char *lang )
 {
   int i;
   htsmsg_t *m = htsmsg_create_list(); 
-  htsmsg_add_str(m, NULL, tvh_gettext_lang(lang, N_("None")));
+  htsmsg_add_msg(m, NULL, htsmsg_create_key_val("", tvh_gettext_lang(lang, N_("None"))));
   for (i = 0; i < ARRAY_SIZE(linuxdvb_rotor_all); i++)
-    htsmsg_add_str(m, NULL, tvh_gettext_lang(lang, linuxdvb_rotor_all[i].name));
+    htsmsg_add_msg(m, NULL, htsmsg_create_key_val(linuxdvb_rotor_all[i].name, tvh_gettext_lang(lang, linuxdvb_rotor_all[i].name)));
   return m;
 }
 

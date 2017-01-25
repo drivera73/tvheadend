@@ -109,8 +109,8 @@ typedef struct mk_muxer {
   htsbuf_queue_t *cluster;
   int64_t cluster_tc;
   off_t cluster_pos;
-  int cluster_maxsize;
-  time_t cluster_last_close;
+  int64_t cluster_last_close;
+  int64_t cluster_maxsize;
 
   off_t segment_header_pos;
 
@@ -235,6 +235,7 @@ mk_build_tracks(mk_muxer_t *mk, streaming_start_t *ss)
 
   mk->tracks = calloc(1, sizeof(mk_track_t) * ss->ss_num_components);
   mk->ntracks = ss->ss_num_components;
+  mk->cluster_maxsize = 4000000;
   for(i = 0; i < ss->ss_num_components; i++) {
     ssc = &ss->ss_components[i];
     tr = &mk->tracks[i];
@@ -254,7 +255,7 @@ mk_build_tracks(mk_muxer_t *mk, streaming_start_t *ss)
     tr->nextpts = PTS_UNSET;
 
     if (mk->webm && ssc->ssc_type != SCT_VP8 && ssc->ssc_type != SCT_VORBIS)
-      tvhwarn("mkv", "WEBM format supports only VP8+VORBIS streams (detected %s)",
+      tvhwarn(LS_MKV, "WEBM format supports only VP8+VORBIS streams (detected %s)",
               streaming_component_type2txt(ssc->ssc_type));
 
     switch(ssc->ssc_type) {
@@ -267,22 +268,26 @@ mk_build_tracks(mk_muxer_t *mk, streaming_start_t *ss)
       tracktype = 1;
       codec_id = "V_MPEG4/ISO/AVC";
       tr->avc = 1;
+      mk->cluster_maxsize = 10000000;
       break;
 
     case SCT_HEVC:
       tracktype = 1;
       codec_id = "V_MPEGH/ISO/HEVC";
+      mk->cluster_maxsize = 20000000;
       tr->hevc = 1;
       break;
 
     case SCT_VP8:
       tracktype = 1;
       codec_id = "V_VP8";
+      mk->cluster_maxsize = 10000000;
       break;
 
     case SCT_VP9:
       tracktype = 1;
       codec_id = "V_VP9";
+      mk->cluster_maxsize = 10000000;
       break;
 
     case SCT_MPEG2AUDIO:
@@ -494,8 +499,7 @@ static void
 mk_write_queue(mk_muxer_t *mk, htsbuf_queue_t *q)
 {
   if(!mk->error && mk_write_to_fd(mk, q) && !MC_IS_EOS_ERROR(mk->error))
-    tvhlog(LOG_ERR, "mkv", "%s: Write failed -- %s", mk->filename,
-	   strerror(errno));
+    tvherror(LS_MKV, "%s: Write failed -- %s", mk->filename, strerror(errno));
 
   htsbuf_queue_flush(q);
 }
@@ -942,7 +946,7 @@ mk_close_cluster(mk_muxer_t *mk)
   if(mk->cluster != NULL)
     mk_write_master(mk, 0x1f43b675, mk->cluster);
   mk->cluster = NULL;
-  mk->cluster_last_close = dispatch_clock;
+  mk->cluster_last_close = mclk();
 }
 
 
@@ -961,7 +965,6 @@ mk_write_frame_i(mk_muxer_t *mk, mk_track_t *t, th_pkt_t *pkt)
 
   uint8_t *data = pktbuf_ptr(pkt->pkt_payload);
   size_t len = pktbuf_len(pkt->pkt_payload);
-  const int clusersizemax = 2000000;
 
   if(!data || len <= 0)
     return;
@@ -980,28 +983,29 @@ mk_write_frame_i(mk_muxer_t *mk, mk_track_t *t, th_pkt_t *pkt)
       mk->totduration = nxt;
 
     delta = pts - mk->cluster_tc;
-    if(delta > 32767ll || delta < -32768ll)
-      mk_close_cluster(mk);
-
-    else if(vkeyframe && (delta > 30000ll || delta < -30000ll))
+    if((vkeyframe || !mk->has_video) && (delta > 30000ll || delta < -30000ll))
       mk_close_cluster(mk);
 
   } else {
     return;
   }
 
-  if(vkeyframe && mk->cluster &&
-     (mk->cluster->hq_size > mk->cluster_maxsize ||
-      mk->cluster_last_close + 1 < dispatch_clock))
-    mk_close_cluster(mk);
+  if(mk->cluster) {
 
-  else if(!mk->has_video && mk->cluster &&
-          (mk->cluster->hq_size > clusersizemax/40 ||
-           mk->cluster_last_close + 1 < dispatch_clock))
-    mk_close_cluster(mk);
+    if(vkeyframe &&
+       (mk->cluster->hq_size > mk->cluster_maxsize ||
+        mk->cluster_last_close + sec2mono(1) < mclk()))
+      mk_close_cluster(mk);
 
-  else if(mk->cluster && mk->cluster->hq_size > clusersizemax)
-    mk_close_cluster(mk);
+    else if(!mk->has_video &&
+            (mk->cluster->hq_size > mk->cluster_maxsize/40 ||
+             mk->cluster_last_close + sec2mono(1) < mclk()))
+      mk_close_cluster(mk);
+
+    else if(mk->cluster->hq_size > mk->cluster_maxsize)
+      mk_close_cluster(mk);
+
+  }
 
   if(mk->cluster == NULL) {
     mk->cluster_tc = pts;
@@ -1176,8 +1180,8 @@ mk_mux_close(mk_muxer_t *mk)
       mk_write_master(mk, 0x1549a966, mk_build_segment_info(mk));
     else {
       mk->error = errno;
-      tvhlog(LOG_ERR, "mkv", "%s: Unable to write duration, seek failed -- %s",
-	     mk->filename, strerror(errno));
+      tvherror(LS_MKV, "%s: Unable to write duration, seek failed -- %s",
+	       mk->filename, strerror(errno));
     }
 
     // Rewrite segment header to update total size
@@ -1185,14 +1189,14 @@ mk_mux_close(mk_muxer_t *mk)
       mk_write_segment_header(mk, totsize - mk->segment_header_pos - 12);
     } else {
       mk->error = errno;
-      tvhlog(LOG_ERR, "mkv", "%s: Unable to write total size, seek failed -- %s",
-	     mk->filename, strerror(errno));
+      tvherror(LS_MKV, "%s: Unable to write total size, seek failed -- %s",
+	       mk->filename, strerror(errno));
     }
 
     if(close(mk->fd)) {
       mk->error = errno;
-      tvhlog(LOG_ERR, "mkv", "%s: Unable to close the file descriptor, close failed -- %s",
-	     mk->filename, strerror(errno));
+      tvherror(LS_MKV, "%s: Unable to close the file descriptor, close failed -- %s",
+	       mk->filename, strerror(errno));
     }
   }
 
@@ -1329,27 +1333,27 @@ mkv_muxer_open_file(muxer_t *m, const char *filename)
   mk_muxer_t *mk = (mk_muxer_t*)m;
   int fd, permissions = mk->m_config.m_file_permissions;
 
-  tvhtrace("mkv", "Creating file \"%s\" with file permissions \"%o\"",
+  tvhtrace(LS_MKV, "Creating file \"%s\" with file permissions \"%o\"",
            filename, permissions);
 
   fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, permissions);
 
   if(fd < 0) {
     mk->error = errno;
-    tvhlog(LOG_ERR, "mkv", "%s: Unable to create file, open failed -- %s",
-	   mk->filename, strerror(errno));
+    tvherror(LS_MKV, "%s: Unable to create file, open failed -- %s",
+	     mk->filename, strerror(errno));
     mk->m_errors++;
     return -1;
   }
 
   /* bypass umask settings */
   if (fchmod(fd, permissions))
-    tvhlog(LOG_ERR, "mkv", "%s: Unable to change permissions -- %s",
-           filename, strerror(errno));
+    tvherror(LS_MKV, "%s: Unable to change permissions -- %s",
+             filename, strerror(errno));
 
   mk->filename = strdup(filename);
   mk->fd = fd;
-  mk->cluster_maxsize = 2000000/4;
+  mk->cluster_maxsize = 2000000;
   mk->seekable = 1;
 
   return 0;

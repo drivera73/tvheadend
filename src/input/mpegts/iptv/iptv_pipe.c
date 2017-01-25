@@ -49,7 +49,7 @@ iptv_pipe_start ( iptv_mux_t *im, const char *raw, const url_t *url )
     goto err;
 
   if (spawn_and_give_stdout(argv[0], argv, envp, &rd, &pid, 1)) {
-    tvherror("iptv", "Unable to start pipe '%s' (wrong executable?)", raw);
+    tvherror(LS_IPTV, "Unable to start pipe '%s' (wrong executable?)", raw);
     goto err;
   }
 
@@ -62,7 +62,7 @@ iptv_pipe_start ( iptv_mux_t *im, const char *raw, const url_t *url )
   im->mm_iptv_fd = rd;
   im->im_data = (void *)(intptr_t)pid;
 
-  im->mm_iptv_respawn_last = dispatch_clock;
+  im->mm_iptv_respawn_last = mclk();
 
   if (url)
     iptv_input_mux_started(im);
@@ -123,8 +123,8 @@ iptv_pipe_read ( iptv_mux_t *im )
       spawn_kill(pid, iptv_pipe_kill_sig(im), im->mm_iptv_kill_timeout);
       im->mm_iptv_fd = -1;
       im->im_data = NULL;
-      if (dispatch_clock < im->mm_iptv_respawn_last + 2) {
-        tvherror("iptv", "stdin pipe unexpectedly closed: %s",
+      if (mclk() < im->mm_iptv_respawn_last + sec2mono(2)) {
+        tvherror(LS_IPTV, "stdin pipe unexpectedly closed: %s",
                  r < 0 ? strerror(errno) : "No data");
       } else {
         /* avoid deadlock here */
@@ -133,10 +133,10 @@ iptv_pipe_read ( iptv_mux_t *im )
         pthread_mutex_lock(&iptv_lock);
         if (im->mm_active) {
           if (iptv_pipe_start(im, im->mm_iptv_url_raw, NULL)) {
-            tvherror("iptv", "unable to respawn %s", im->mm_iptv_url_raw);
+            tvherror(LS_IPTV, "unable to respawn %s", im->mm_iptv_url_raw);
           } else {
             iptv_input_fd_started(im);
-            im->mm_iptv_respawn_last = dispatch_clock;
+            im->mm_iptv_respawn_last = mclk();
           }
         }
         pthread_mutex_unlock(&iptv_lock);

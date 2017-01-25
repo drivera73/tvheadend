@@ -67,7 +67,7 @@ typedef void (tcp_server_callback_t)(int fd, void *opaque,
 				     struct sockaddr_storage *peer,
 				     struct sockaddr_storage *self);
 
-void *tcp_server_create(const char *subsystem, const char *name,
+void *tcp_server_create(int subsystem, const char *name,
                         const char *bindaddr, int port,
                         tcp_server_ops_t *ops, void *opaque);
 
@@ -78,6 +78,8 @@ void tcp_server_delete(void *server);
 int tcp_default_ip_addr(struct sockaddr_storage *deflt, int family);
 
 int tcp_server_bound(void *server, struct sockaddr_storage *bound, int family);
+
+int tcp_server_onall(void *server);
 
 int tcp_read(int fd, void *buf, size_t len);
 

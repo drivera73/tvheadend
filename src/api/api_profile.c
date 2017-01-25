@@ -20,8 +20,35 @@
 #include "tvheadend.h"
 #include "access.h"
 #include "htsmsg.h"
+#include "subscriptions.h"
 #include "api.h"
 #include "profile.h"
+
+/*
+ *
+ */
+static int
+api_profile_is_all(access_t *perm, htsmsg_t *args)
+{
+  return htsmsg_get_bool_or_default(args, "all", 0) &&
+         !access_verify2(perm, ACCESS_ADMIN);
+}
+
+static int
+api_profile_find(access_t *perm, const char *uuid)
+{
+  htsmsg_field_t *f;
+  const char *uuid2;
+
+  if (perm->aa_profiles == NULL)
+    return 1;
+  HTSMSG_FOREACH(f, perm->aa_profiles) {
+    uuid2 = htsmsg_field_get_str(f) ?: "";
+    if (strcmp(uuid, uuid2) == 0)
+      return 1;
+  }
+  return 0;
+}
 
 /*
  *
@@ -31,16 +58,19 @@ api_profile_list
   ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp )
 {
   profile_t *pro;
-  htsmsg_t *l, *e;
+  htsmsg_t *l;
+  int cfg = api_profile_is_all(perm, args);
+  int sflags = htsmsg_get_bool_or_default(args, "htsp", 0) ? SUBSCRIPTION_HTSP : 0;
   char ubuf[UUID_HEX_SIZE];
 
+  sflags |= SUBSCRIPTION_PACKET|SUBSCRIPTION_MPEGTS;
   l = htsmsg_create_list();
   pthread_mutex_lock(&global_lock);
   TAILQ_FOREACH(pro, &profiles, pro_link) {
-    e = htsmsg_create_map();
-    htsmsg_add_str(e, "key", idnode_uuid_as_str(&pro->pro_id, ubuf));
-    htsmsg_add_str(e, "val", profile_get_name(pro));
-    htsmsg_add_msg(l, NULL, e);
+    idnode_uuid_as_str(&pro->pro_id, ubuf);
+    if (!cfg && (!profile_verify(pro, sflags) || !api_profile_find(perm, ubuf)))
+      continue;
+    htsmsg_add_msg(l, NULL, htsmsg_create_key_val(ubuf, profile_get_name(pro)));
   }
   pthread_mutex_unlock(&global_lock);
   *resp = htsmsg_create_map();
@@ -78,6 +108,7 @@ api_profile_create
   int err = 0;
   const char *clazz;
   htsmsg_t *conf;
+  profile_t *pro;
 
   if (!(clazz = htsmsg_get_str(args, "class")))
     return EINVAL;
@@ -86,7 +117,10 @@ api_profile_create
   htsmsg_set_str(conf, "class", clazz);
 
   pthread_mutex_lock(&global_lock);
-  if (profile_create(NULL, conf, 1) == NULL)
+  pro = profile_create(NULL, conf, 1);
+  if (pro)
+    api_idnode_create(resp, &pro->pro_id);
+  else
     err = -EINVAL;
   pthread_mutex_unlock(&global_lock);
 

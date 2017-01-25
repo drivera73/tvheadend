@@ -25,7 +25,7 @@
 #include "redblack.h"
 #include "access.h"
 
-#define TVH_API_VERSION 18
+#define TVH_API_VERSION 19
 
 /*
  * Command hook
@@ -115,13 +115,19 @@ int api_idnode_load_by_class
 
 int api_idnode_handler
   ( access_t *perm, htsmsg_t *args, htsmsg_t **resp,
-    void (*handler)(access_t *perm, idnode_t *in), const char *op );
+    void (*handler)(access_t *perm, idnode_t *in), const char *op, int destroyed );
 
 int api_idnode_load_simple
   ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp );
 
 int api_idnode_save_simple
   ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp );
+
+void api_idnode_create
+  ( htsmsg_t **resp, idnode_t *in );
+
+void api_idnode_create_list
+  ( htsmsg_t **resp, htsmsg_t *list );
 
 /*
  * Service mapper

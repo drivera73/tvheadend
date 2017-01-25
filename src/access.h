@@ -22,6 +22,8 @@
 #include "idnode.h"
 #include "htsmsg.h"
 
+#define ACCESS_DEFAULT_COMMENT "Default access entry"
+
 struct profile;
 struct dvr_config;
 struct channel_tag;
@@ -95,12 +97,17 @@ typedef struct access_entry {
   char *ae_username;
   char *ae_comment;
   char *ae_lang;
+  int ae_change_lang;
   char *ae_lang_ui;
+  int ae_change_lang_ui;
+  char *ae_theme;
+  int ae_change_theme;
 
   int ae_index;
   int ae_wizard;
   int ae_enabled;
   int ae_uilevel;
+  int ae_change_uilevel;
   int ae_uilevel_nochange;
 
   int ae_streaming;
@@ -108,9 +115,11 @@ typedef struct access_entry {
   int ae_htsp_streaming;
 
   idnode_list_head_t ae_profiles;
+  int ae_change_profiles;
 
   int ae_conn_limit_type;
   uint32_t ae_conn_limit;
+  int ae_change_conn_limit;
 
   int ae_dvr;
   int ae_htsp_dvr;
@@ -118,17 +127,23 @@ typedef struct access_entry {
   int ae_all_rw_dvr;
   int ae_failed_dvr;
 
+  int ae_htsp_anonymize;
+
   idnode_list_head_t ae_dvr_configs;
+  int ae_change_dvr_configs;
 
   int ae_webui;
   int ae_admin;
 
   uint64_t ae_chmin;
   uint64_t ae_chmax;
+  int ae_change_chrange;
 
   int ae_chtags_exclude;
   idnode_list_head_t ae_chtags;
+  int ae_change_chtags;
 
+  int ae_change_rights;
   uint32_t ae_rights;
 
   struct access_ipmask_queue ae_ipmasks;
@@ -155,6 +170,7 @@ typedef struct access {
   uint32_t  aa_conn_dvr;
   int       aa_uilevel;
   int       aa_uilevel_nochange;
+  char     *aa_theme;
 } access_t;
 
 TAILQ_HEAD(access_ticket_queue, access_ticket);
@@ -166,7 +182,7 @@ typedef struct access_ticket {
 
   TAILQ_ENTRY(access_ticket) at_link;
 
-  gtimer_t at_timer;
+  mtimer_t at_timer;
   char *at_resource;
   access_t *at_access;
 } access_ticket_t;
@@ -182,7 +198,8 @@ typedef struct access_ticket {
 #define ACCESS_ALL_RECORDER       (1<<7)
 #define ACCESS_ALL_RW_RECORDER    (1<<8)
 #define ACCESS_FAILED_RECORDER    (1<<9)
-#define ACCESS_ADMIN              (1<<10)
+#define ACCESS_HTSP_ANONYMIZE     (1<<10)
+#define ACCESS_ADMIN              (1<<11)
 #define ACCESS_OR                 (1<<30)
 
 #define ACCESS_FULL \
@@ -215,10 +232,21 @@ void access_destroy(access_t *a);
 access_t *access_copy(access_t *src);
 
 /**
+ * Compare the access structures
+ */
+int access_compare(access_t *a, access_t *b);
+
+/**
  *
  */
 char *
 access_get_lang(access_t *a, const char *lang);
+
+/**
+ *
+ */
+const char *
+access_get_theme(access_t *a);
 
 /**
  * Verifies that the given user in combination with the source ip
@@ -226,9 +254,6 @@ access_get_lang(access_t *a, const char *lang);
  *
  * Return 0 if access is granted, -1 otherwise
  */
-int access_verify(const char *username, const char *password,
-		  struct sockaddr *src, uint32_t mask);
-
 static inline int access_verify2(access_t *a, uint32_t mask)
   { return (mask & ACCESS_OR) ?
       ((a->aa_rights & mask) ? 0 : -1) :
@@ -239,15 +264,10 @@ int access_verify_list(htsmsg_t *list, const char *item);
 /**
  * Get the access structure
  */
-access_t *access_get(const char *username, const char *password,
-                     struct sockaddr *src);
+typedef int (*verify_callback_t)(void *aux, const char *passwd);
 
-/**
- *
- */
-access_t *
-access_get_hashed(const char *username, const uint8_t digest[20],
-		  const uint8_t *challenge, struct sockaddr *src);
+access_t *access_get(struct sockaddr *src, const char *username,
+                     verify_callback_t verify, void *aux);
 
 /**
  *
@@ -277,12 +297,6 @@ access_entry_destroy(access_entry_t *ae, int delconf);
  *
  */
 void
-access_entry_save(access_entry_t *ae);
-
-/**
- *
- */
-void
 access_destroy_by_profile(struct profile *pro, int delconf);
 void
 access_destroy_by_dvr_config(struct dvr_config *cfg, int delconf);
@@ -296,16 +310,12 @@ passwd_entry_t *
 passwd_entry_create(const char *uuid, htsmsg_t *conf);
 void
 passwd_entry_destroy(passwd_entry_t *ae, int delconf);
-void
-passwd_entry_save(passwd_entry_t *pw);
 
 /**
  *
  */
 ipblock_entry_t *
 ipblock_entry_create(const char *uuid, htsmsg_t *conf);
-void
-ipblock_entry_save(ipblock_entry_t *pw);
 
 /**
  *
@@ -318,6 +328,7 @@ void access_done(void);
  */
 htsmsg_t *language_get_list ( void *obj, const char *lang );
 htsmsg_t *language_get_ui_list ( void *obj, const char *lang );
+htsmsg_t *theme_get_ui_list ( void *obj, const char *lang );
 htsmsg_t *user_get_userlist ( void *obj, const char *lang );
 
 #endif /* ACCESS_H_ */

@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include "queue.h"
+#include "build.h"
 
 #define HTSMSG_ERR_FIELD_NOT_FOUND       -1
 #define HTSMSG_ERR_CONVERSION_IMPOSSIBLE -2
@@ -41,6 +42,7 @@ typedef struct htsmsg {
    * Data to be free'd when the message is destroyed
    */
   const void *hm_data;
+  size_t hm_data_size;
 } htsmsg_t;
 
 
@@ -58,8 +60,10 @@ typedef struct htsmsg_field {
   uint8_t hmf_type;
   uint8_t hmf_flags;
 
-#define HMF_ALLOCED 0x1
-#define HMF_NAME_ALLOCED 0x2
+#define HMF_ALLOCED        0x1
+#define HMF_INALLOCED      0x2
+#define HMF_NAME_INALLOCED 0x4
+#define HMF_NAME_ALLOCED   0x8
 
   union {
     int64_t  s64;
@@ -72,6 +76,11 @@ typedef struct htsmsg_field {
     double dbl;
     int bool;
   } u;
+
+#if ENABLE_SLOW_MEMORYINFO
+  size_t hmf_edata_size;
+#endif
+  char hmf_edata[0];
 } htsmsg_field_t;
 
 #define hmf_s64     u.s64
@@ -156,6 +165,11 @@ htsmsg_set_s32(htsmsg_t *msg, const char *name,  int32_t s32)
 void htsmsg_add_str(htsmsg_t *msg, const char *name, const char *str);
 
 /**
+ * Add a string field (NULL check).
+ */
+void htsmsg_add_str2(htsmsg_t *msg, const char *name, const char *str);
+
+/**
  * Add a string field to a list only once.
  */
 void htsmsg_add_str_exclusive(htsmsg_t *msg, const char *str);
@@ -169,6 +183,7 @@ int  htsmsg_set_str(htsmsg_t *msg, const char *name, const char *str);
  * Update a string field
  */
 int  htsmsg_field_set_str(htsmsg_field_t *f, const char *str);
+int  htsmsg_field_set_str_force(htsmsg_field_t *f, const char *str);
 
 /**
  * Add an field where source is a list or map message.
@@ -373,7 +388,7 @@ void htsmsg_print(htsmsg_t *msg);
  * Create a new field. Primarily intended for htsmsg internal functions.
  */
 htsmsg_field_t *htsmsg_field_add(htsmsg_t *msg, const char *name,
-				 int type, int flags);
+				 int type, int flags, size_t esize);
 
 /**
  * Get a field, return NULL if it does not exist
@@ -411,3 +426,12 @@ const char *htsmsg_get_cdata(htsmsg_t *m, const char *field);
 char *htsmsg_list_2_csv(htsmsg_t *m, char delim, int human);
 
 htsmsg_t *htsmsg_csv_2_list(const char *str, char delim);
+
+htsmsg_t *htsmsg_create_key_val(const char *key, const char *val);
+
+/**
+ *
+ */
+struct memoryinfo;
+extern struct memoryinfo htsmsg_memoryinfo;
+extern struct memoryinfo htsmsg_field_memoryinfo;

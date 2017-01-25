@@ -1,3 +1,22 @@
+tvheadend.epggrab_rerun_button = function() {
+    return {
+        name: 'trigger',
+        builder: function() {
+            return new Ext.Toolbar.Button({
+                text: _("Re-run Internal EPG Grabbers"),
+                tooltip: _('Re-run all internal EPG grabbers to import EPG data now'),
+                iconCls: 'find',
+            });
+        },
+        callback: function(conf) {
+            tvheadend.Ajax({
+               url: 'api/epggrab/internal/rerun',
+               params: { rerun: 1 },
+            });
+        }
+    };
+}
+
 tvheadend.epggrab_base = function(panel, index) {
 
     var triggerButton = {
@@ -25,10 +44,7 @@ tvheadend.epggrab_base = function(panel, index) {
         tabIndex: index,
         width: 550,
         labelWidth: 200,
-        tbar: [triggerButton],
-        help: function() {
-            new tvheadend.help(_('EPG Grab Configuration'), 'config_epggrab.html');
-        }
+        tbar: [triggerButton, tvheadend.epggrab_rerun_button()]
     });
 
 }
@@ -42,13 +58,11 @@ tvheadend.epggrab_map = function(panel, index) {
         titleP: _('EPG Grabber Channels'),
         iconCls: 'baseconf',
         tabIndex: index,
+        uilevel: 'expert',
         del: true,
         sort: {
           field: 'name',
           direction: 'ASC'
-        },
-        help: function() {
-            new tvheadend.help(_('EPG Grabber Channels'), 'config_epggrab.html');
         }
     });
 
@@ -68,6 +82,7 @@ tvheadend.epggrab_mod = function(panel, index) {
 
     tvheadend.idnode_form_grid(panel, {
         tabIndex: index,
+        uilevel: 'advanced',
         clazz: 'epggrab_mod',
         comet: 'epggrab_mod',
         titleS: _('EPG Grabber Module'),
@@ -80,9 +95,7 @@ tvheadend.epggrab_mod = function(panel, index) {
         list: { url: 'api/epggrab/module/list', params: { } },
         lcol: [actions],
         plugins: [actions],
-        help: function() {
-            new tvheadend.help(_('EPG Grab Configuration'), 'config_epggrab.html');
-        }
+        tbar: [tvheadend.epggrab_rerun_button()]
     });
 
 };

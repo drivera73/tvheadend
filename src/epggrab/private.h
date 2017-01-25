@@ -27,7 +27,7 @@ struct mpegts_mux;
 
 epggrab_module_t *epggrab_module_create
   ( epggrab_module_t *skel, const idclass_t *cls,
-    const char *id, const char *saveid,
+    const char *id, int subsys, const char *saveid,
     const char *name, int priority );
 
 char     *epggrab_module_grab_spawn ( void *m );
@@ -75,7 +75,7 @@ void epggrab_channel_done(void);
 
 epggrab_module_int_t *epggrab_module_int_create
   ( epggrab_module_int_t *skel, const idclass_t *cls,
-    const char *id, const char *saveid,
+    const char *id, int subsys, const char *saveid,
     const char *name, int priority,
     const char *path,
     char* (*grab) (void*m),
@@ -87,8 +87,8 @@ epggrab_module_int_t *epggrab_module_int_create
  * *************************************************************************/
 
 epggrab_module_ext_t *epggrab_module_ext_create
-  ( epggrab_module_ext_t *skel,
-    const char *id, const char *saveid,
+  ( epggrab_module_ext_t *skel, const idclass_t *cls,
+    const char *id, int subsys, const char *saveid,
     const char *name, int priority,
     const char *sockid,
     int (*parse) (void *m, htsmsg_t *data, epggrab_stats_t *sta),
@@ -108,7 +108,7 @@ typedef struct epggrab_ota_module_ops {
 
 epggrab_module_ota_t *epggrab_module_ota_create
   ( epggrab_module_ota_t *skel,
-    const char *id, const char *saveid,
+    const char *id, int subsys, const char *saveid,
     const char *name, int priority,
     epggrab_ota_module_ops_t *ops );
 
@@ -176,11 +176,24 @@ epggrab_ota_service_del
 
 /* Note: this is reused by pyepg since they share a common format */
 int  xmltv_parse_accessibility
-  ( epggrab_module_t *mod, epg_broadcast_t *ebc, htsmsg_t *m );
+  ( epg_broadcast_t *ebc, htsmsg_t *m, uint32_t *changes );
 
 /* Freesat huffman decoder */
 size_t freesat_huffman_decode
-  (char *dst, size_t* dstlen, const uint8_t *src, size_t srclen);
+  ( char *dst, size_t* dstlen, const uint8_t *src, size_t srclen );
+
+/* **************************************************************************
+ * Classes
+ * *************************************************************************/
+
+extern const idclass_t epggrab_mod_class;
+extern const idclass_t epggrab_mod_int_class;
+extern const idclass_t epggrab_mod_int_pyepg_class;
+extern const idclass_t epggrab_mod_int_xmltv_class;
+extern const idclass_t epggrab_mod_ext_class;
+extern const idclass_t epggrab_mod_ext_pyepg_class;
+extern const idclass_t epggrab_mod_ext_xmltv_class;
+extern const idclass_t epggrab_mod_ota_class;
 
 /* **************************************************************************
  * Module setup(s)

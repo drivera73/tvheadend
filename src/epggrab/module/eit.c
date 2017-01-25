@@ -67,12 +67,12 @@ _eit_dtag_dump
 #if APS_DEBUG
   int i = 0, j = 0;
   char tmp[100];
-  tvhlog(LOG_DEBUG, mod->id, "  dtag 0x%02X len %d", dtag, dlen);
+  tvhdebug(mod->subsys, "%s:  dtag 0x%02X len %d", mt->mt_name, dtag, dlen);
   while (i < dlen) {
     j += sprintf(tmp+j, "%02X ", buf[i]);
     i++;
     if ((i % 8) == 0 || (i == dlen)) {
-      tvhlog(LOG_DEBUG, mod->id, "    %s", tmp);
+      tvhdebug(mod->subsys, "%s:    %s", mt->mt_name, tmp);
       j = 0;
     }
   }
@@ -415,10 +415,12 @@ static int _eit_process_event_one
   uint16_t eid;
   uint8_t dtag, dlen, running;
   epg_broadcast_t *ebc;
-  epg_episode_t *ee;
+  epg_episode_t *ee = NULL;
   epg_serieslink_t *es;
   epg_running_t run;
   eit_event_t ev;
+  uint32_t changes2 = 0, changes3 = 0, changes4 = 0;
+  char tm1[32], tm2[32];
 
   /* Core fields */
   eid   = ptr[0] << 8 | ptr[1];
@@ -434,11 +436,13 @@ static int _eit_process_event_one
   if ( len < dllen ) return -1;
 
   /* Find broadcast */
-  ebc  = epg_broadcast_find_by_time(ch, start, stop, eid, 1, &save2);
-  tvhtrace("eit", "svc='%s', ch='%s', eid=%5d, start=%"PRItime_t","
-                  " stop=%"PRItime_t", ebc=%p",
+  ebc  = epg_broadcast_find_by_time(ch, mod, start, stop, 1, &save2, &changes2);
+  tvhtrace(LS_TBL_EIT, "svc='%s', ch='%s', eid=%5d, tbl=%02x, running=%d, start=%s,"
+                       " stop=%s, ebc=%p",
            svc->s_dvb_svcname ?: "(null)", ch ? channel_get_name(ch) : "(null)",
-           eid, start, stop, ebc);
+           eid, tableid, running,
+           gmtime2local(start, tm1, sizeof(tm1)),
+           gmtime2local(stop, tm2, sizeof(tm2)), ebc);
   if (!ebc) return 0;
 
   /* Mark re-schedule detect (only now/next) */
@@ -458,8 +462,8 @@ static int _eit_process_event_one
     ptr   += 2;
     if (dllen < dlen) break;
 
-    tvhtrace(mod->id, "  dtag %02X dlen %d", dtag, dlen);
-    tvhlog_hexdump(mod->id, ptr, dlen);
+    tvhtrace(mod->subsys, "%s:  dtag %02X dlen %d", mod->id, dtag, dlen);
+    tvhlog_hexdump(mod->subsys, ptr, dlen);
 
     switch (dtag) {
       case DVB_DESC_SHORT_EVENT:
@@ -495,26 +499,30 @@ static int _eit_process_event_one
    * Broadcast
    */
 
+  *save |= epg_broadcast_set_dvb_eid(ebc, eid, &changes2);
+
   /* Summary/Description */
-  if ( ev.summary )
-    *save |= epg_broadcast_set_summary2(ebc, ev.summary, mod);
-  if ( ev.desc )
-    *save |= epg_broadcast_set_description2(ebc, ev.desc, mod);
+  if (ev.summary)
+    *save |= epg_broadcast_set_summary(ebc, ev.summary, &changes2);
+  if (ev.desc)
+    *save |= epg_broadcast_set_description(ebc, ev.desc, &changes2);
 
   /* Broadcast Metadata */
-  *save |= epg_broadcast_set_is_hd(ebc, ev.hd, mod);
-  *save |= epg_broadcast_set_is_widescreen(ebc, ev.ws, mod);
-  *save |= epg_broadcast_set_is_audio_desc(ebc, ev.ad, mod);
-  *save |= epg_broadcast_set_is_subtitled(ebc, ev.st, mod);
-  *save |= epg_broadcast_set_is_deafsigned(ebc, ev.ds, mod);
+  *save |= epg_broadcast_set_is_hd(ebc, ev.hd, &changes2);
+  *save |= epg_broadcast_set_is_widescreen(ebc, ev.ws, &changes2);
+  *save |= epg_broadcast_set_is_audio_desc(ebc, ev.ad, &changes2);
+  *save |= epg_broadcast_set_is_subtitled(ebc, ev.st, &changes2);
+  *save |= epg_broadcast_set_is_deafsigned(ebc, ev.ds, &changes2);
 
   /*
    * Series link
    */
 
   if (*ev.suri) {
-    if ((es = epg_serieslink_find_by_uri(ev.suri, 1, save)))
-      *save |= epg_broadcast_set_serieslink(ebc, es, mod);
+    if ((es = epg_serieslink_find_by_uri(ev.suri, mod, 1, save, &changes3))) {
+      *save |= epg_broadcast_set_serieslink(ebc, es, &changes2);
+      *save |= epg_serieslink_change_finish(es, changes3, 0);
+    }
   }
 
   /*
@@ -523,29 +531,31 @@ static int _eit_process_event_one
 
   /* Find episode */
   if (*ev.uri) {
-    if ((ee = epg_episode_find_by_uri(ev.uri, 1, save)))
-      *save |= epg_broadcast_set_episode(ebc, ee, mod);
-
-  /* Existing/Artificial */
-  } else
-    ee = epg_broadcast_get_episode(ebc, 1, save);
+    ee = epg_episode_find_by_uri(ev.uri, mod, 1, save, &changes4);
+  } else {
+    ee = epg_episode_find_by_broadcast(ebc, mod, 1, save, &changes4);
+  }
 
   /* Update Episode */
   if (ee) {
-    *save |= epg_episode_set_is_bw(ee, ev.bw, mod);
-    if ( ev.title )
-      *save |= epg_episode_set_title2(ee, ev.title, mod);
-    if ( ev.genre )
-      *save |= epg_episode_set_genre(ee, ev.genre, mod);
-    if ( ev.parental )
-      *save |= epg_episode_set_age_rating(ee, ev.parental, mod);
-    if ( ev.summary )
-      *save |= epg_episode_set_subtitle2(ee, ev.summary, mod);
+    *save |= epg_broadcast_set_episode(ebc, ee, &changes2);
+    *save |= epg_episode_set_is_bw(ee, ev.bw, &changes4);
+    if (ev.title)
+      *save |= epg_episode_set_title(ee, ev.title, &changes4);
+    if (ev.genre)
+      *save |= epg_episode_set_genre(ee, ev.genre, &changes4);
+    if (ev.parental)
+      *save |= epg_episode_set_age_rating(ee, ev.parental, &changes4);
+    if (ev.summary)
+      *save |= epg_episode_set_subtitle(ee, ev.summary, &changes4);
 #if TODO_ADD_EXTRA
-    if ( ev.extra )
-      *save |= epg_episode_set_extra(ee, extra, mod);
+    if (ev.extra)
+      *save |= epg_episode_set_extra(ee, extra, &changes4);
 #endif
+    *save |= epg_episode_change_finish(ee, changes4, 0);
   }
+
+  *save |= epg_broadcast_change_finish(ebc, changes2, 0);
 
   /* Tidy up */
 #if TODO_ADD_EXTRA
@@ -630,7 +640,7 @@ _eit_callback
   /* Validate */
   if(tableid < 0x4e || tableid > 0x6f || len < 11) {
     if (ths)
-      ths->ths_total_err++;
+      atomic_add(&ths->ths_total_err, 1);
     return -1;
   }
 
@@ -643,7 +653,8 @@ _eit_callback
   // TODO: extra ID should probably include onid
 
   /* Register interest */
-  if (tableid == 0x4e || (tableid >= 0x50 && tableid < 0x60))
+  if (tableid == 0x4e || (tableid >= 0x50 && tableid < 0x60) ||
+      mt->mt_pid == 3003 /* uk_freesat */)
     ota = epggrab_ota_register((epggrab_module_ota_t*)mod, NULL, mm);
 
   /* Begin */
@@ -665,14 +676,14 @@ _eit_callback
   // Note: tableid=0x4f,0x60-0x6f is other TS
   //       so must find the tdmi
   if(tableid == 0x4f || tableid >= 0x60) {
-    mm = mpegts_network_find_mux(mm->mm_network, onid, tsid);
+    mm = mpegts_network_find_mux(mm->mm_network, onid, tsid, 1);
 
   } else {
     if ((mm->mm_tsid != tsid || mm->mm_onid != onid) &&
         !mm->mm_eit_tsid_nocheck) {
       if (mm->mm_onid != MPEGTS_ONID_NONE &&
           mm->mm_tsid != MPEGTS_TSID_NONE)
-        tvhtrace("eit",
+        tvhtrace(LS_TBL_EIT,
                 "invalid tsid found tid 0x%02X, onid:tsid %d:%d != %d:%d",
                 tableid, mm->mm_onid, mm->mm_tsid, onid, tsid);
       mm = NULL;
@@ -684,7 +695,7 @@ _eit_callback
   /* Get service */
   svc = mpegts_mux_find_service(mm, sid);
   if (!svc) {
-    tvhtrace("eit", "sid %i not found", sid);
+    tvhtrace(LS_TBL_EIT, "sid %i not found", sid);
     goto done;
   }
 
@@ -754,7 +765,7 @@ static int _eit_start
 
   /* Freesat (3002/3003) */
   if (!strcmp("uk_freesat", m->id)) {
-    mpegts_table_add(dm, 0, 0, dvb_bat_callback, NULL, "bat", MT_CRC, 3002, MPS_WEIGHT_EIT);
+    mpegts_table_add(dm, 0, 0, dvb_bat_callback, NULL, "bat", LS_TBL_BASE, MT_CRC, 3002, MPS_WEIGHT_EIT);
     pid = 3003;
 
   /* Viasat Baltic (0x39) */
@@ -770,9 +781,9 @@ static int _eit_start
     pid  = DVB_EIT_PID;
     opts = MT_RECORD;
   }
-  mpegts_table_add(dm, 0, 0, _eit_callback, map, m->id, MT_CRC | opts, pid, MPS_WEIGHT_EIT);
+  mpegts_table_add(dm, 0, 0, _eit_callback, map, m->id, LS_TBL_EIT, MT_CRC | opts, pid, MPS_WEIGHT_EIT);
   // TODO: might want to limit recording to EITpf only
-  tvhlog(LOG_DEBUG, m->id, "installed table handlers");
+  tvhdebug(m->subsys, "%s: installed table handlers", m->id);
   return 0;
 }
 
@@ -818,11 +829,11 @@ void eit_init ( void )
     .tune  = _eit_tune,
   };
 
-  epggrab_module_ota_create(NULL, "eit", NULL, "EIT: DVB Grabber", 1, &ops);
-  epggrab_module_ota_create(NULL, "uk_freesat", NULL, "UK: Freesat", 5, &ops);
-  epggrab_module_ota_create(NULL, "uk_freeview", NULL, "UK: Freeview", 5, &ops);
-  epggrab_module_ota_create(NULL, "viasat_baltic", NULL, "VIASAT: Baltic", 5, &ops);
-  epggrab_module_ota_create(NULL, "Bulsatcom_39E", NULL, "Bulsatcom: Bula 39E", 5, &ops);
+  epggrab_module_ota_create(NULL, "eit", LS_TBL_EIT, NULL, "EIT: DVB Grabber", 1, &ops);
+  epggrab_module_ota_create(NULL, "uk_freesat", LS_TBL_EIT, NULL, "UK: Freesat", 5, &ops);
+  epggrab_module_ota_create(NULL, "uk_freeview", LS_TBL_EIT, NULL, "UK: Freeview", 5, &ops);
+  epggrab_module_ota_create(NULL, "viasat_baltic", LS_TBL_EIT, NULL, "VIASAT: Baltic", 5, &ops);
+  epggrab_module_ota_create(NULL, "Bulsatcom_39E", LS_TBL_EIT, NULL, "Bulsatcom: Bula 39E", 5, &ops);
 }
 
 void eit_done ( void )

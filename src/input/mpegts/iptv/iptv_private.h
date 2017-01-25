@@ -93,7 +93,7 @@ struct iptv_network
   char    *in_url;
   char    *in_url_sane;
   int      in_bouquet;
-  gtimer_t in_bouquet_timer;
+  mtimer_t in_bouquet_timer;
   char    *in_ctx_charset;
   int64_t  in_channel_number;
   uint32_t in_refetch_period;
@@ -101,6 +101,7 @@ struct iptv_network
   char    *in_icon_url_sane;
   int      in_ssl_peer_verify;
   char    *in_remove_args;
+  int      in_tsid_accept_zero_value;
 
   void    *in_auto; /* private structure for auto-network */
 };
@@ -147,7 +148,7 @@ struct iptv_mux
   uint32_t              mm_iptv_buffer_limit;
 
   iptv_handler_t       *im_handler;
-  gtimer_t              im_pause_timer;
+  mtimer_t              im_pause_timer;
 
   int64_t               im_pcr;
   int64_t               im_pcr_start;
@@ -174,6 +175,7 @@ iptv_service_t *iptv_service_create0
 
 extern const idclass_t iptv_network_class;
 extern const idclass_t iptv_auto_network_class;
+extern const idclass_t iptv_mux_class;
 
 extern iptv_input_t   *iptv_input;
 extern iptv_network_t *iptv_network;

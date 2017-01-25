@@ -33,9 +33,10 @@ tsfile_input_list_t      tsfile_inputs;
 extern const idclass_t mpegts_service_class;
 extern const idclass_t mpegts_network_class;
 
-static void
-tsfile_service_config_save ( service_t *s )
+static htsmsg_t *
+tsfile_service_config_save ( service_t *s, char *filename, size_t fsize )
 {
+  return NULL;
 }
 
 static void
@@ -137,10 +138,11 @@ void tsfile_add_file ( const char *path )
     uuid = tmp;
   }
 
-  tvhtrace("tsfile", "add file %s (uuid:%s)", path, uuid);
+  tvhtrace(LS_TSFILE, "add file %s (uuid:%s)", path, uuid);
   
   /* Create logical instance */
   mm = tsfile_mux_create(uuid, tsfile_network);
+  mm->mm_tsid_accept_zero_value = 1;
   
   /* Create physical instance (for each tuner) */
   LIST_FOREACH(mi, &tsfile_inputs, tsi_link)

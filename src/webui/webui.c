@@ -249,11 +249,13 @@ page_static_file(http_connection_t *hc, const char *_remain, void *opaque)
       nogzip = 1;
     else if(!strcmp(postfix, "jpg"))
       nogzip = 1;
+    else if(!strcmp(postfix, "png"))
+      nogzip = 1;
   }
 
   fb_file *fp = fb_open(path, 0, (nogzip || gzip) ? 0 : 1);
   if (!fp) {
-    tvhlog(LOG_ERR, "webui", "failed to open %s", path);
+    tvherror(LS_WEBUI, "failed to open %s", path);
     return HTTP_STATUS_INTERNAL;
   }
   size = fb_size(fp);
@@ -311,16 +313,13 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
 		const char *name, th_subscription_t *s)
 {
   streaming_message_t *sm;
-  int run = 1;
-  int started = 0;
+  int run = 1, started = 0;
   streaming_queue_t *sq = &prch->prch_sq;
   muxer_t *mux = prch->prch_muxer;
-  time_t lastpkt;
-  int ptimeout, grace = 20;
-  struct timespec ts;
-  struct timeval  tp;
+  int ptimeout, grace = 20, r;
+  struct timeval tp;
   streaming_start_t *ss_copy;
-  int64_t mono;
+  int64_t lastpkt, mono;
 
   if(muxer_open_stream(mux, hc->hc_fd))
     run = 0;
@@ -332,7 +331,7 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
   if (config.dscp >= 0)
     socket_set_dscp(hc->hc_fd, config.dscp, NULL, 0);
 
-  lastpkt = dispatch_clock;
+  lastpkt = mclk();
   ptimeout = prch->prch_pro ? prch->prch_pro->pro_timeout : 5;
 
   if (hc->hc_no_output) {
@@ -341,26 +340,26 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
     pthread_mutex_unlock(&sq->sq_mutex);
   }
 
-  while(!hc->hc_shutdown && run && tvheadend_running) {
+  while(!hc->hc_shutdown && run && tvheadend_is_running()) {
     pthread_mutex_lock(&sq->sq_mutex);
     sm = TAILQ_FIRST(&sq->sq_queue);
     if(sm == NULL) {
-      gettimeofday(&tp, NULL);
-      ts.tv_sec  = tp.tv_sec + 1;
-      ts.tv_nsec = tp.tv_usec * 1000;
-
-      if(pthread_cond_timedwait(&sq->sq_cond, &sq->sq_mutex, &ts) == ETIMEDOUT) {
-
-        /* Check socket status */
-        if (tcp_socket_dead(hc->hc_fd)) {
-          tvhlog(LOG_DEBUG, "webui",  "Stop streaming %s, client hung up", hc->hc_url_orig);
-          run = 0;
-        } else if((!started && dispatch_clock - lastpkt > grace) ||
-                   (started && ptimeout > 0 && dispatch_clock - lastpkt > ptimeout)) {
-          tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
-          run = 0;
+      mono = mclk() + sec2mono(1);
+      do {
+        r = tvh_cond_timedwait(&sq->sq_cond, &sq->sq_mutex, mono);
+        if (r == ETIMEDOUT) {
+          /* Check socket status */
+          if (tcp_socket_dead(hc->hc_fd)) {
+            tvhdebug(LS_WEBUI,  "Stop streaming %s, client hung up", hc->hc_url_orig);
+            run = 0;
+          } else if((!started && mclk() - lastpkt > sec2mono(grace)) ||
+                     (started && ptimeout > 0 && mclk() - lastpkt > sec2mono(ptimeout))) {
+            tvhwarn(LS_WEBUI,  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
+            run = 0;
+          }
+          break;
         }
-      }
+      } while (ERRNO_AGAIN(r));
       pthread_mutex_unlock(&sq->sq_mutex);
       continue;
     }
@@ -380,7 +379,7 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
           pb = sm->sm_data;
         subscription_add_bytes_out(s, len = pktbuf_len(pb));
         if (len > 0)
-          lastpkt = dispatch_clock;
+          lastpkt = mclk();
         muxer_write_pkt(mux, sm->sm_type, sm->sm_data);
         sm->sm_data = NULL;
       }
@@ -393,17 +392,17 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
     case SMT_START:
       grace = 10;
       if(!started) {
-        tvhlog(LOG_DEBUG, "webui", "%s streaming %s",
-               hc->hc_no_output ? "Probe" : "Start", hc->hc_url_orig);
+        tvhdebug(LS_WEBUI, "%s streaming %s",
+                 hc->hc_no_output ? "Probe" : "Start", hc->hc_url_orig);
         http_output_content(hc, muxer_mime(mux, sm->sm_data));
 
         if (hc->hc_no_output) {
           streaming_msg_free(sm);
-          mono = getmonoclock() + 2000000;
-          while (getmonoclock() < mono) {
+          mono = mclk() + sec2mono(2);
+          while (mclk() < mono) {
             if (tcp_socket_dead(hc->hc_fd))
               break;
-            usleep(50000);
+            tvh_safe_usleep(50000);
           }
           return;
         }
@@ -415,26 +414,26 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
 
         started = 1;
       } else if(muxer_reconfigure(mux, sm->sm_data) < 0) {
-        tvhlog(LOG_WARNING, "webui",  "Unable to reconfigure stream %s", hc->hc_url_orig);
+        tvhwarn(LS_WEBUI,  "Unable to reconfigure stream %s", hc->hc_url_orig);
       }
       break;
 
     case SMT_STOP:
       if(sm->sm_code != SM_CODE_SOURCE_RECONFIGURED) {
-        tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, %s", hc->hc_url_orig, 
-               streaming_code2txt(sm->sm_code));
+        tvhwarn(LS_WEBUI,  "Stop streaming %s, %s", hc->hc_url_orig, 
+                streaming_code2txt(sm->sm_code));
         run = 0;
       }
       break;
 
     case SMT_SERVICE_STATUS:
       if(tcp_socket_dead(hc->hc_fd)) {
-        tvhlog(LOG_DEBUG, "webui",  "Stop streaming %s, client hung up",
-               hc->hc_url_orig);
+        tvhdebug(LS_WEBUI,  "Stop streaming %s, client hung up",
+                 hc->hc_url_orig);
         run = 0;
-      } else if((!started && dispatch_clock - lastpkt > grace) ||
-                 (started && ptimeout > 0 && dispatch_clock - lastpkt > ptimeout)) {
-        tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
+      } else if((!started && mclk() - lastpkt > sec2mono(grace)) ||
+                 (started && ptimeout > 0 && mclk() - lastpkt > sec2mono(ptimeout))) {
+        tvhwarn(LS_WEBUI,  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
         run = 0;
       }
       break;
@@ -448,14 +447,14 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
       break;
 
     case SMT_NOSTART:
-      tvhlog(LOG_WARNING, "webui",  "Couldn't start streaming %s, %s",
-             hc->hc_url_orig, streaming_code2txt(sm->sm_code));
+      tvhwarn(LS_WEBUI,  "Couldn't start streaming %s, %s",
+              hc->hc_url_orig, streaming_code2txt(sm->sm_code));
       run = 0;
       break;
 
     case SMT_EXIT:
-      tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, %s", hc->hc_url_orig,
-             streaming_code2txt(sm->sm_code));
+      tvhwarn(LS_WEBUI,  "Stop streaming %s, %s", hc->hc_url_orig,
+              streaming_code2txt(sm->sm_code));
       run = 0;
       break;
     }
@@ -464,7 +463,7 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
 
     if(mux->m_errors) {
       if (!mux->m_eos)
-        tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, muxer reported errors", hc->hc_url_orig);
+        tvhwarn(LS_WEBUI,  "Stop streaming %s, muxer reported errors", hc->hc_url_orig);
       run = 0;
     }
   }
@@ -864,6 +863,9 @@ http_dvr_list_playlist(http_connection_t *hc, int pltype)
 
     if (de->de_channel &&
         http_access_verify_channel(hc, ACCESS_RECORDER, de->de_channel))
+      continue;
+
+    if (hc->hc_access == NULL)
       continue;
 
     durration  = dvr_entry_get_stop_time(de) - dvr_entry_get_start_time(de, 0);
@@ -1511,7 +1513,6 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
     return HTTP_STATUS_UNAUTHORIZED;
 
   pthread_mutex_lock(&global_lock);
-
   de = dvr_entry_find_by_uuid(remain);
   if (de == NULL)
     de = dvr_entry_find_by_id(atoi(remain));
@@ -1617,6 +1618,17 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
       free(str);
     }
   }
+  /* Play count + 1 when write access */
+  if (!hc->hc_no_output && file_start <= 0 &&
+      !dvr_entry_verify(de, hc->hc_access, 0)) {
+    de = dvr_entry_find_by_uuid(remain);
+    if (de == NULL)
+      de = dvr_entry_find_by_id(atoi(remain));
+    if (de) {
+      de->de_playcount = de->de_playcount + 1;
+      dvr_entry_changed_notify(de);
+    }
+  }
   pthread_mutex_unlock(&global_lock);
   if (tcp_id == NULL) {
     close(fd);
@@ -1709,7 +1721,7 @@ page_imagecache(http_connection_t *hc, const char *remain, void *opaque)
   pthread_mutex_lock(&hc->hc_fd_lock);
   http_send_header(hc, 200, NULL, st.st_size, 0, NULL, 10, 0, NULL, NULL);
 
-  while (1) {
+  while (!hc->hc_no_output) {
     c = read(fd, buf, sizeof(buf));
     if (c <= 0)
       break;
@@ -1739,8 +1751,7 @@ webui_static_content(const char *http_path, const char *source)
 static int
 favicon(http_connection_t *hc, const char *remain, void *opaque)
 {
-  http_redirect(hc, "static/htslogo.png", NULL, 0);
-  return 0;
+  return page_static_file(hc, "logo.png", (void *)"src/webui/static/img");
 }
 
 /**
@@ -1762,7 +1773,7 @@ static int http_file_test(const char *path)
 static int
 http_redir(http_connection_t *hc, const char *remain, void *opaque)
 {
-  const char *lang;
+  const char *lang, *theme;
   char *components[3];
   char buf[256];
   int nc;
@@ -1791,18 +1802,41 @@ http_redir(http_connection_t *hc, const char *remain, void *opaque)
       pthread_mutex_unlock(&hc->hc_fd_lock);
       return 0;
     }
-  }
-
-  if (nc >= 2) {
-    if (!strcmp(components[0], "docs")) {
-      lang = tvh_gettext_get_lang(hc->hc_access->aa_lang_ui);
-      snprintf(buf, sizeof(buf), "docs/html/%s/%s%s%s", lang, components[1],
-                                 nc > 2 ? "/" : "", nc > 2 ? components[1] : "");
-      if (http_file_test(buf)) lang = "en";
-      snprintf(buf, sizeof(buf), "/docs/%s/%s%s%s", lang, components[1],
-                                 nc > 2 ? "/" : "", nc > 2 ? components[1] : "");
-      http_redirect(hc, buf, NULL, 0);
-      return 0;
+    if (!strcmp(components[0], "theme.css")) {
+      theme = access_get_theme(hc->hc_access);
+      if (theme) {
+        snprintf(buf, sizeof(buf), "src/webui/static/tvh.%s.css.gz", theme);
+        if (!http_file_test(buf)) {
+          snprintf(buf, sizeof(buf), "/static/tvh.%s.css.gz", theme);
+          http_css_import(hc, buf);
+          return 0;
+        }
+      }
+      return HTTP_STATUS_BAD_REQUEST;
+    }
+    if (!strcmp(components[0], "theme.debug.css")) {
+      theme = access_get_theme(hc->hc_access);
+      if (theme) {
+        snprintf(buf, sizeof(buf), "src/webui/static/extjs/resources/css/xtheme-%s.css", theme);
+        if (!http_file_test(buf)) {
+          snprintf(buf, sizeof(buf), "/static/extjs/resources/css/xtheme-%s.css", theme);
+          http_css_import(hc, buf);
+          return 0;
+        }
+      }
+      return HTTP_STATUS_BAD_REQUEST;
+    }
+    if (!strcmp(components[0], "theme.app.debug.css")) {
+      theme = access_get_theme(hc->hc_access);
+      if (theme) {
+        snprintf(buf, sizeof(buf), "src/webui/static/app/ext-%s.css", theme);
+        if (!http_file_test(buf)) {
+          snprintf(buf, sizeof(buf), "/static/app/ext-%s.css", theme);
+          http_css_import(hc, buf);
+          return 0;
+        }
+      }
+      return HTTP_STATUS_BAD_REQUEST;
     }
   }
 
@@ -1822,7 +1856,7 @@ webui_init(int xspf)
   webui_xspf = xspf;
 
   if (tvheadend_webui_debug)
-    tvhlog(LOG_INFO, "webui", "Running web interface in debug mode");
+    tvhinfo(LS_WEBUI, "Running web interface in debug mode");
 
   s = tvheadend_webroot;
   tvheadend_webroot = NULL;
@@ -1843,6 +1877,7 @@ webui_init(int xspf)
   http_path_add("/favicon.ico", NULL, favicon, ACCESS_WEB_INTERFACE);
   http_path_add("/playlist", NULL, page_http_playlist, ACCESS_ANONYMOUS);
   http_path_add("/xmltv", NULL, page_xmltv, ACCESS_ANONYMOUS);
+  http_path_add("/markdown", NULL, page_markdown, ACCESS_ANONYMOUS);
 
   http_path_add("/state", NULL, page_statedump, ACCESS_ADMIN);
 
@@ -1853,8 +1888,6 @@ webui_init(int xspf)
   http_path_add("/redir",  NULL, http_redir, ACCESS_ANONYMOUS);
 
   webui_static_content("/static",        "src/webui/static");
-  webui_static_content("/docs",          "docs/html");
-  webui_static_content("/docresources",  "docs/docresources");
 
   simpleui_start();
   extjs_start();

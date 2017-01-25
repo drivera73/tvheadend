@@ -62,7 +62,7 @@ struct satip_device
 {
   tvh_hardware_t;
 
-  gtimer_t                   sd_destroy_timer;
+  mtimer_t                   sd_destroy_timer;
   int                        sd_inload;
   int                        sd_nosave;
 
@@ -97,6 +97,7 @@ struct satip_device
   int                        sd_skip_ts;
   int                        sd_disable_workarounds;
   pthread_mutex_t            sd_tune_mutex;
+  TAILQ_HEAD(,satip_frontend)sd_serialize_queue;
 };
 
 struct satip_tune_req {
@@ -107,6 +108,10 @@ struct satip_tune_req {
 
   int                        sf_weight;
   int                        sf_weight_tuned;
+
+  int                        sf_netlimit;
+  int                        sf_netgroup;
+  int                        sf_netposhash;
 };
 
 struct satip_frontend
@@ -146,7 +151,7 @@ struct satip_frontend
   int                        sf_atsc_c;
   int                        sf_position;
   signal_state_t             sf_status;
-  gtimer_t                   sf_monitor_timer;
+  mtimer_t                   sf_monitor_timer;
   uint64_t                   sf_last_tune;
   satip_tune_req_t          *sf_req;
   satip_tune_req_t          *sf_req_thread;
@@ -156,6 +161,9 @@ struct satip_frontend
   uint32_t                   sf_seq;
   dvb_mux_t                 *sf_curmux;
   time_t                     sf_last_data_tstamp;
+  int                        sf_netlimit;
+  int                        sf_netgroup;
+  int                        sf_netposhash;
  
   /*
    * Configuration
@@ -182,12 +190,27 @@ struct satip_satconf
   int                        sfc_priority;
   int                        sfc_grace;
   char                      *sfc_name;
+  int                        sfc_network_limit;
+  int                        sfc_network_group;
 
   /*
    * Assigned networks to this SAT configuration
    */
   idnode_set_t              *sfc_networks;
 };
+
+/*
+ * Classes
+ */
+extern const idclass_t satip_frontend_class;
+
+extern const idclass_t satip_frontend_dvbt_class;
+extern const idclass_t satip_frontend_dvbs_class;
+extern const idclass_t satip_frontend_dvbs_slave_class;
+extern const idclass_t satip_frontend_atsc_t_class;
+extern const idclass_t satip_frontend_atsc_c_class;
+
+extern const idclass_t satip_satconf_class;
 
 /*
  * Methods
@@ -197,13 +220,17 @@ void satip_device_init ( void );
 
 void satip_device_done ( void );
 
-void satip_device_save ( satip_device_t *sd );
+static inline void satip_device_changed ( satip_device_t *sd )
+  { idnode_changed(&sd->th_id); }
 
 void satip_device_destroy ( satip_device_t *sd );
 
 void satip_device_destroy_later( satip_device_t *sd, int after_ms );
 
 char *satip_device_nicename ( satip_device_t *sd, char *buf, int len );
+
+int satip_frontend_match_satcfg
+  ( satip_frontend_t *lfe2, mpegts_mux_t *mm2, int flags, int weight );
 
 satip_frontend_t *
 satip_frontend_create
@@ -232,8 +259,9 @@ int satip_satconf_get_priority
 int satip_satconf_get_grace
   ( satip_frontend_t *lfe, mpegts_mux_t *mm );
 
-int satip_satconf_get_position
-  ( satip_frontend_t *lfe, mpegts_mux_t *mm );
+satip_satconf_t *satip_satconf_get_position
+  ( satip_frontend_t *lfe, mpegts_mux_t *mm, int *hash,
+    int check, int flags, int weight );
 
 /*
  * RTSP part

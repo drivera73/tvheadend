@@ -36,7 +36,7 @@
 
 struct dvr_timerec_entry_queue timerec_entries;
 
-static gtimer_t dvr_timerec_timer;
+static mtimer_t dvr_timerec_timer;
 
 /**
  *
@@ -77,7 +77,7 @@ dvr_timerec_purge_spawn(dvr_timerec_entry_t *dte, int delconf)
       if (de->de_sched_state == DVR_SCHEDULED)
         dvr_entry_cancel(de, 0);
       else
-        dvr_entry_save(de);
+        idnode_changed(&de->de_id);
     }
   }
 }
@@ -105,7 +105,7 @@ void
 dvr_timerec_check(dvr_timerec_entry_t *dte)
 {
   dvr_entry_t *de;
-  time_t start, stop, limit;
+  time_t clk, start, stop, limit;
   struct tm tm_start, tm_stop;
   const char *title;
   char buf[200];
@@ -119,22 +119,21 @@ dvr_timerec_check(dvr_timerec_entry_t *dte)
   if(dte->dte_channel == NULL)
     goto fail;
 
-  limit = dispatch_clock - 600;
-  start = dvr_timerec_timecorrection(dispatch_clock, dte->dte_start, &tm_start);
-  stop  = dvr_timerec_timecorrection(dispatch_clock, dte->dte_stop,  &tm_stop);
+  clk   = gclk();
+  limit = clk - 600;
+  start = dvr_timerec_timecorrection(clk, dte->dte_start, &tm_start);
+  stop  = dvr_timerec_timecorrection(clk, dte->dte_stop,  &tm_stop);
   if (start < limit && stop < limit) {
     /* next day */
-    start = dvr_timerec_timecorrection(dispatch_clock + 24*60*60,
-                                       dte->dte_start,
-                                       &tm_start);
-    stop  = dvr_timerec_timecorrection(dispatch_clock + 24*60*60,
-                                       dte->dte_stop,
-                                       &tm_stop);
+    clk += 24*60*60;
+    start = dvr_timerec_timecorrection(clk, dte->dte_start, &tm_start);
+    stop  = dvr_timerec_timecorrection(clk, dte->dte_stop, &tm_stop);
   }
   /* day boundary correction */
-  if (start > stop)
-    stop += 24 * 60 * 60;
-  assert(start <= stop);
+  while (start > stop) {
+    clk += 24*60*60;
+    stop = dvr_timerec_timecorrection(clk, dte->dte_stop, &tm_stop);
+  }
 
   if(dte->dte_weekdays != 0x7f) {
     localtime_r(&start, &tm_start);
@@ -179,7 +178,7 @@ dvr_timerec_create(const char *uuid, htsmsg_t *conf)
 
   if (idnode_insert(&dte->dte_id, uuid, &dvr_timerec_entry_class, 0)) {
     if (uuid)
-      tvhwarn("dvr", "invalid timerec entry uuid '%s'", uuid);
+      tvhwarn(LS_DVR, "invalid timerec entry uuid '%s'", uuid);
     free(dte);
     return NULL;
   }
@@ -189,6 +188,7 @@ dvr_timerec_create(const char *uuid, htsmsg_t *conf)
   dte->dte_pri = DVR_PRIO_NORMAL;
   dte->dte_start = -1;
   dte->dte_stop = -1;
+  dte->dte_enabled = 1;
   dte->dte_config = dvr_config_find_by_name_default(NULL);
   LIST_INSERT_HEAD(&dte->dte_config->dvr_timerec_entries, dte, dte_config_link);
 
@@ -209,10 +209,8 @@ dvr_timerec_create_htsp(htsmsg_t *conf)
   dte = dvr_timerec_create(NULL, conf);
   htsmsg_destroy(conf);
 
-  if (dte) {
-    dvr_timerec_save(dte);
-    dvr_timerec_check(dte);
-  }
+  if (dte)
+    idnode_changed(&dte->dte_id);
 
   return dte;
 }
@@ -221,10 +219,8 @@ void
 dvr_timerec_update_htsp (dvr_timerec_entry_t *dte, htsmsg_t *conf)
 {
   idnode_update(&dte->dte_id, conf);
-  dvr_timerec_save(dte);
-  dvr_timerec_check(dte);
-  htsp_timerec_entry_update(dte);
-  tvhlog(LOG_INFO, "timerec", "\"%s\" on \"%s\": Updated", dte->dte_title ? dte->dte_title : "",
+  idnode_changed(&dte->dte_id);
+  tvhinfo(LS_DVR, "timerec \"%s\" on \"%s\": Updated", dte->dte_title ? dte->dte_title : "",
       (dte->dte_channel && dte->dte_channel->ch_name) ? dte->dte_channel->ch_name : "any channel");
 }
 
@@ -235,6 +231,8 @@ static void
 timerec_entry_destroy(dvr_timerec_entry_t *dte, int delconf)
 {
   char ubuf[UUID_HEX_SIZE];
+
+  idnode_save_check(&dte->dte_id, delconf);
 
   dvr_timerec_purge_spawn(dte, delconf);
 
@@ -262,33 +260,27 @@ timerec_entry_destroy(dvr_timerec_entry_t *dte, int delconf)
   free(dte);
 }
 
-/**
- *
- */
-void
-dvr_timerec_save(dvr_timerec_entry_t *dte)
-{
-  htsmsg_t *m = htsmsg_create_map();
-  char ubuf[UUID_HEX_SIZE];
-
-  lock_assert(&global_lock);
-
-  idnode_save(&dte->dte_id, m);
-  hts_settings_save(m, "dvr/timerec/%s", idnode_uuid_as_str(&dte->dte_id, ubuf));
-  htsmsg_destroy(m);
-}
-
 /* **************************************************************************
  * DVR Autorec Entry Class definition
  * **************************************************************************/
 
 static void
-dvr_timerec_entry_class_save(idnode_t *self)
+dvr_timerec_entry_class_changed(idnode_t *self)
 {
   dvr_timerec_entry_t *dte = (dvr_timerec_entry_t *)self;
-  dvr_timerec_save(dte);
   dvr_timerec_check(dte);
   htsp_timerec_entry_update(dte);
+}
+
+static htsmsg_t *
+dvr_timerec_entry_class_save(idnode_t *self, char *filename, size_t fsize)
+{
+  dvr_timerec_entry_t *dte = (dvr_timerec_entry_t *)self;
+  htsmsg_t *m = htsmsg_create_map();
+  char ubuf[UUID_HEX_SIZE];
+  idnode_save(&dte->dte_id, m);
+  snprintf(filename, fsize, "dvr/timerec/%s", idnode_uuid_as_str(&dte->dte_id, ubuf));
+  return m;
 }
 
 static void
@@ -336,6 +328,9 @@ dvr_timerec_entry_class_channel_set(void *o, const void *v)
       return 1;
     }
   } else if (dte->dte_channel != ch) {
+    if (dte->dte_id.in_access &&
+        !channel_access(ch, dte->dte_id.in_access, 1))
+      return 0;
     if (dte->dte_channel)
       LIST_REMOVE(dte, dte_channel_link);
     dte->dte_channel = ch;
@@ -523,10 +518,15 @@ dvr_timerec_entry_class_owner_opts(void *o)
   return PO_RDONLY | PO_ADVANCED;
 }
 
+CLASS_DOC(dvrtimerec)
+PROP_DOC(dvr_timerec_title_format)
+
 const idclass_t dvr_timerec_entry_class = {
   .ic_class      = "dvrtimerec",
-  .ic_caption    = N_("DVR time record entry"),
+  .ic_caption    = N_("DVR - Time-based Recording (Timers)"),
   .ic_event      = "dvrtimerec",
+  .ic_doc        = tvh_doc_dvrtimerec_class,
+  .ic_changed    = dvr_timerec_entry_class_changed,
   .ic_save       = dvr_timerec_entry_class_save,
   .ic_get_title  = dvr_timerec_entry_class_get_title,
   .ic_delete     = dvr_timerec_entry_class_delete,
@@ -537,6 +537,7 @@ const idclass_t dvr_timerec_entry_class = {
       .id       = "enabled",
       .name     = N_("Enabled"),
       .desc     = N_("Enable/disable the entry."),
+      .def.i    = 1,
       .off      = offsetof(dvr_timerec_entry_t, dte_enabled),
     },
     {
@@ -550,9 +551,11 @@ const idclass_t dvr_timerec_entry_class = {
       .type     = PT_STR,
       .id       = "title",
       .name     = N_("Title"),
-      .desc     = N_("Title of the recording."),
+      .desc     = N_("Title of the recording - this is used to generate the filename."),
+      .doc      = prop_doc_dvr_timerec_title_format,
       .off      = offsetof(dvr_timerec_entry_t, dte_title),
       .def.s    = "Time-%F_%R",
+      .opts     = PO_ADVANCED
     },
     {
       .type     = PT_STR,
@@ -579,23 +582,23 @@ const idclass_t dvr_timerec_entry_class = {
       .type     = PT_STR,
       .id       = "start",
       .name     = N_("Start"),
-      .desc     = N_("Time to start the recording/Time the recording started."),
+      .desc     = N_("Time to start the recording/time the recording started."),
       .set      = dvr_timerec_entry_class_start_set,
       .get      = dvr_timerec_entry_class_start_get,
       .list     = dvr_timerec_entry_class_time_list,
       .def.s    = "12:00",
-      .opts     = PO_SORTKEY,
+      .opts     = PO_SORTKEY | PO_DOC_NLIST,
     },
     {
       .type     = PT_STR,
       .id       = "stop",
       .name     = N_("Stop"),
-      .desc     = N_("Time to stop recording/Time the recording stopped."),
+      .desc     = N_("Time to stop recording/time the recording stopped."),
       .set      = dvr_timerec_entry_class_stop_set,
       .get      = dvr_timerec_entry_class_stop_get,
       .list     = dvr_timerec_entry_class_time_list,
       .def.s    = "12:00",
-      .opts     = PO_SORTKEY,
+      .opts     = PO_SORTKEY | PO_DOC_NLIST,
     },
     {
       .type     = PT_U32,
@@ -607,37 +610,38 @@ const idclass_t dvr_timerec_entry_class = {
       .get      = dvr_timerec_entry_class_weekdays_get,
       .list     = dvr_autorec_entry_class_weekdays_list,
       .rend     = dvr_timerec_entry_class_weekdays_rend,
-      .def.list = dvr_timerec_entry_class_weekdays_default
+      .def.list = dvr_timerec_entry_class_weekdays_default,
+      .opts     = PO_DOC_NLIST,
     },
     {
       .type     = PT_U32,
       .id       = "pri",
       .name     = N_("Priority"),
-      .desc     = N_("Priority of the entry."),
+      .desc     = N_("Priority of the entry, higher-priority entries will take precedence and cancel lower-priority events."),
       .list     = dvr_entry_class_pri_list,
       .def.i    = DVR_PRIO_NORMAL,
       .off      = offsetof(dvr_timerec_entry_t, dte_pri),
-      .opts     = PO_SORTKEY | PO_ADVANCED,
+      .opts     = PO_SORTKEY | PO_ADVANCED | PO_DOC_NLIST,
     },
     {
       .type     = PT_U32,
       .id       = "retention",
       .name     = N_("DVR log retention"),
       .desc     = N_("Number of days to retain entry information."),
-      .def.i    = DVR_RET_DVRCONFIG,
+      .def.i    = DVR_RET_REM_DVRCONFIG,
       .off      = offsetof(dvr_timerec_entry_t, dte_retention),
       .list     = dvr_entry_class_retention_list,
-      .opts     = PO_EXPERT
+      .opts     = PO_EXPERT | PO_DOC_NLIST,
     },
     {
       .type     = PT_U32,
       .id       = "removal",
       .name     = N_("DVR file retention period"),
-      .desc     = N_("Number of days to keep the file."),
-      .def.i    = DVR_RET_DVRCONFIG,
+      .desc     = N_("Number of days to keep the recorded file."),
+      .def.i    = DVR_RET_REM_DVRCONFIG,
       .off      = offsetof(dvr_timerec_entry_t, dte_removal),
       .list     = dvr_entry_class_removal_list,
-      .opts     = PO_ADVANCED
+      .opts     = PO_ADVANCED | PO_DOC_NLIST,
     },
     {
       .type     = PT_STR,
@@ -662,7 +666,7 @@ const idclass_t dvr_timerec_entry_class = {
       .type     = PT_STR,
       .id       = "creator",
       .name     = N_("Creator"),
-      .desc     = N_("The user who created the recording or the "
+      .desc     = N_("The user who created the recording, or the "
                      "auto-recording source and IP address if scheduled "
                      "by a matching rule."),
       .off      = offsetof(dvr_timerec_entry_t, dte_creator),
@@ -689,6 +693,7 @@ dvr_timerec_init(void)
   htsmsg_field_t *f;
 
   TAILQ_INIT(&timerec_entries);
+  idclass_register(&dvr_timerec_entry_class);
   if((l = hts_settings_load("dvr/timerec")) != NULL) {
     HTSMSG_FOREACH(f, l) {
       if((c = htsmsg_get_map_by_field(f)) == NULL)
@@ -715,7 +720,7 @@ dvr_timerec_timer_cb(void *aux)
 {
   dvr_timerec_entry_t *dte;
 
-  tvhtrace("dvr", "timerec update");
+  tvhtrace(LS_DVR, "timerec update");
 
   /* check all entries */
   TAILQ_FOREACH(dte, &timerec_entries, dte_link) {
@@ -723,7 +728,7 @@ dvr_timerec_timer_cb(void *aux)
   }
 
   /* load the timer */
-  gtimer_arm(&dvr_timerec_timer, dvr_timerec_timer_cb, NULL, 3550);
+  mtimer_arm_rel(&dvr_timerec_timer, dvr_timerec_timer_cb, NULL, sec2mono(3550));
 }
 
 void
@@ -775,7 +780,7 @@ timerec_destroy_by_config(dvr_config_t *kcfg, int delconf)
       LIST_INSERT_HEAD(&cfg->dvr_timerec_entries, dte, dte_config_link);
     dte->dte_config = cfg;
     if (delconf)
-      dvr_timerec_save(dte);
+      idnode_changed(&dte->dte_id);
   }
 }
 
@@ -786,14 +791,9 @@ uint32_t
 dvr_timerec_get_retention_days( dvr_timerec_entry_t *dte )
 {
   if (dte->dte_retention > 0) {
-    if (dte->dte_retention > DVR_RET_FOREVER)
-      return DVR_RET_FOREVER;
-
-    /* As we need the db entry when deleting the file on disk */
-    if (dvr_timerec_get_removal_days(dte) != DVR_RET_FOREVER &&
-        dvr_timerec_get_removal_days(dte) > dte->dte_retention)
-      return DVR_RET_ONREMOVE;
-
+    if (dte->dte_retention > DVR_RET_REM_FOREVER)
+      return DVR_RET_REM_FOREVER;
+      
     return dte->dte_retention;
   }
   return dvr_retention_cleanup(dte->dte_config->dvr_retention_days);
@@ -806,8 +806,8 @@ uint32_t
 dvr_timerec_get_removal_days( dvr_timerec_entry_t *dte )
 {
   if (dte->dte_removal > 0) {
-    if (dte->dte_removal > DVR_RET_FOREVER)
-      return DVR_RET_FOREVER;
+    if (dte->dte_removal > DVR_RET_REM_FOREVER)
+      return DVR_RET_REM_FOREVER;
 
     return dte->dte_removal;
   }

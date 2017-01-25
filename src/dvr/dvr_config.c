@@ -74,7 +74,7 @@ dvr_config_find_by_name_default(const char *name)
   if (dvrdefaultconfig == NULL) {
     cfg = dvr_config_create("", NULL, NULL);
     assert(cfg);
-    dvr_config_save(cfg);
+    idnode_changed(&cfg->dvr_id);
     dvrdefaultconfig = cfg;
   }
 
@@ -85,10 +85,10 @@ dvr_config_find_by_name_default(const char *name)
 
   if (cfg == NULL) {
     if (name && *name)
-      tvhlog(LOG_WARNING, "dvr", "Configuration '%s' not found, using default", name);
+      tvhwarn(LS_DVR, "Configuration '%s' not found, using default", name);
     cfg = dvrdefaultconfig;
   } else if (!cfg->dvr_enabled) {
-    tvhlog(LOG_WARNING, "dvr", "Configuration '%s' not enabled, using default", name);
+    tvhwarn(LS_DVR, "Configuration '%s' not enabled, using default", name);
     cfg = dvrdefaultconfig;
   }
 
@@ -170,7 +170,7 @@ dvr_config_create(const char *name, const char *uuid, htsmsg_t *conf)
 
   if (idnode_insert(&cfg->dvr_id, uuid, &dvr_config_class, 0)) {
     if (uuid)
-      tvherror("dvr", "invalid config uuid '%s'", uuid);
+      tvherror(LS_DVR, "invalid config uuid '%s'", uuid);
     free(cfg);
     return NULL;
   }
@@ -178,7 +178,7 @@ dvr_config_create(const char *name, const char *uuid, htsmsg_t *conf)
   cfg->dvr_enabled = 1;
   cfg->dvr_config_name = strdup(name);
   cfg->dvr_retention_days = DVR_RET_ONREMOVE;
-  cfg->dvr_removal_days = DVR_RET_FOREVER;
+  cfg->dvr_removal_days = DVR_RET_REM_FOREVER;
   cfg->dvr_clone = 1;
   cfg->dvr_tag_files = 1;
   cfg->dvr_skip_commercials = 1;
@@ -190,7 +190,7 @@ dvr_config_create(const char *name, const char *uuid, htsmsg_t *conf)
   cfg->dvr_cleanup_threshold_used = 0;    // disabled
 
   /* Muxer config */
-  cfg->dvr_muxcnf.m_cache  = MC_CACHE_DONTKEEP;
+  cfg->dvr_muxcnf.m_cache  = MC_CACHE_SYSTEM;
 
   /* Default recording file and directory permissions */
 
@@ -204,16 +204,16 @@ dvr_config_create(const char *name, const char *uuid, htsmsg_t *conf)
     cfg->dvr_valid = 1;
   }
 
-  tvhinfo("dvr", "Creating new configuration '%s'", cfg->dvr_config_name);
+  tvhinfo(LS_DVR, "Creating new configuration '%s'", cfg->dvr_config_name);
 
   if (cfg->dvr_profile == NULL) {
-    cfg->dvr_profile = profile_find_by_name("dvr", NULL);
+    cfg->dvr_profile = profile_find_by_name("pass", NULL);
     assert(cfg->dvr_profile);
     LIST_INSERT_HEAD(&cfg->dvr_profile->pro_dvr_configs, cfg, profile_link);
   }
 
   if (dvr_config_is_default(cfg) && dvr_config_find_by_name(NULL)) {
-    tvherror("dvr", "Unable to create second default config, removing");
+    tvherror(LS_DVR, "Unable to create second default config, removing");
     LIST_INSERT_HEAD(&dvrconfigs, cfg, config_link);
     dvr_config_destroy(cfg, 0);
     cfg = NULL;
@@ -236,8 +236,10 @@ dvr_config_destroy(dvr_config_t *cfg, int delconf)
 {
   char ubuf[UUID_HEX_SIZE];
 
+  idnode_save_check(&cfg->dvr_id, delconf);
+
   if (delconf) {
-    tvhinfo("dvr", "Deleting configuration '%s'", cfg->dvr_config_name);
+    tvhinfo(LS_DVR, "Deleting configuration '%s'", cfg->dvr_config_name);
     hts_settings_remove("dvr/config/%s", idnode_uuid_as_str(&cfg->dvr_id, ubuf));
   }
   LIST_REMOVE(cfg, config_link);
@@ -258,6 +260,9 @@ dvr_config_destroy(dvr_config_t *cfg, int delconf)
   free(cfg->dvr_charset);
   free(cfg->dvr_storage);
   free(cfg->dvr_config_name);
+  free(cfg->dvr_preproc);
+  free(cfg->dvr_postproc);
+  free(cfg->dvr_postremove);
   free(cfg);
 }
 
@@ -289,12 +294,12 @@ dvr_config_storage_check(dvr_config_t *cfg)
       cfg->dvr_storage = strdup(getcwd(buf, sizeof(buf)));
   }
 
-  tvhlog(LOG_WARNING, "dvr",
-         "Output directory for video recording is not yet configured "
-         "for DVR configuration \"%s\". "
-         "Defaulting to to \"%s\". "
-         "This can be changed from the web user interface.",
-         cfg->dvr_config_name, cfg->dvr_storage);
+  tvhwarn(LS_DVR,
+          "Output directory for video recording is not yet configured "
+          "for DVR configuration \"%s\". "
+          "Defaulting to to \"%s\". "
+          "This can be changed from the web user interface.",
+          cfg->dvr_config_name, cfg->dvr_storage);
 }
 
 /**
@@ -505,43 +510,15 @@ dvr_config_delete(const char *name)
   if (!dvr_config_is_default(cfg))
     dvr_config_destroy(cfg, 1);
   else
-    tvhwarn("dvr", "Attempt to delete default config ignored");
+    tvhwarn(LS_DVR, "Attempt to delete default config ignored");
 }
 
-/*
+/**
  *
  */
 void
-dvr_config_save(dvr_config_t *cfg)
+dvr_config_changed(dvr_config_t *cfg)
 {
-  htsmsg_t *m = htsmsg_create_map();
-  char ubuf[UUID_HEX_SIZE];
-
-  lock_assert(&global_lock);
-
-  dvr_config_storage_check(cfg);
-  if (cfg->dvr_cleanup_threshold_free < 50)
-    cfg->dvr_cleanup_threshold_free = 50; // as checking is only periodically, lower is not save
-  if (cfg->dvr_removal_days != DVR_RET_FOREVER &&
-      cfg->dvr_removal_days > cfg->dvr_retention_days)
-    cfg->dvr_retention_days = DVR_RET_ONREMOVE;
-  if (cfg->dvr_removal_days > DVR_RET_FOREVER)
-    cfg->dvr_removal_days = DVR_RET_FOREVER;
-  if (cfg->dvr_retention_days > DVR_RET_FOREVER)
-    cfg->dvr_retention_days = DVR_RET_FOREVER;
-  idnode_save(&cfg->dvr_id, m);
-  hts_settings_save(m, "dvr/config/%s", idnode_uuid_as_str(&cfg->dvr_id, ubuf));
-  htsmsg_destroy(m);
-}
-
-/* **************************************************************************
- * DVR Config Class definition
- * **************************************************************************/
-
-static void
-dvr_config_class_save(idnode_t *self)
-{
-  dvr_config_t *cfg = (dvr_config_t *)self;
   if (dvr_config_is_default(cfg))
     cfg->dvr_enabled = 1;
   cfg->dvr_valid = 1;
@@ -551,7 +528,37 @@ dvr_config_class_save(idnode_t *self)
   } else {
     dvr_update_pathname_from_booleans(cfg);
   }
-  dvr_config_save(cfg);
+  dvr_config_storage_check(cfg);
+  if (cfg->dvr_cleanup_threshold_free < 50)
+    cfg->dvr_cleanup_threshold_free = 50; // as checking is only periodically, lower is not save
+  if (cfg->dvr_removal_days > DVR_RET_REM_FOREVER)
+    cfg->dvr_removal_days = DVR_RET_REM_FOREVER;
+  if (cfg->dvr_retention_days > DVR_RET_REM_FOREVER)
+    cfg->dvr_retention_days = DVR_RET_REM_FOREVER;
+  if (cfg->dvr_profile && !strcmp(profile_get_name(cfg->dvr_profile), "htsp")) // htsp is for streaming only
+    cfg->dvr_profile = profile_find_by_name("pass", NULL);
+}
+
+
+/* **************************************************************************
+ * DVR Config Class definition
+ * **************************************************************************/
+
+static void
+dvr_config_class_changed(idnode_t *self)
+{
+  dvr_config_changed((dvr_config_t *)self);
+}
+
+static htsmsg_t *
+dvr_config_class_save(idnode_t *self, char *filename, size_t fsize)
+{
+  dvr_config_t *cfg = (dvr_config_t *)self;
+  htsmsg_t *m = htsmsg_create_map();
+  char ubuf[UUID_HEX_SIZE];
+  idnode_save(&cfg->dvr_id, m);
+  snprintf(filename, fsize, "dvr/config/%s", idnode_uuid_as_str(&cfg->dvr_id, ubuf));
+  return m;
 }
 
 static void
@@ -632,7 +639,7 @@ dvr_config_class_profile_set(void *o, const void *v)
   profile_t *pro;
 
   pro = v ? profile_find_by_uuid(v) : NULL;
-  pro = pro ?: profile_find_by_name(v, "dvr");
+  pro = pro ?: profile_find_by_name(v, "pass");
   if (pro == NULL) {
     if (cfg->dvr_profile) {
       LIST_REMOVE(cfg, profile_link);
@@ -711,21 +718,21 @@ static htsmsg_t *
 dvr_config_class_removal_list ( void *o, const char *lang )
 {
   static const struct strtab_u32 tab[] = {
-    { N_("1 day"),              DVR_RET_1DAY },
-    { N_("3 days"),             DVR_RET_3DAY },
-    { N_("5 days"),             DVR_RET_5DAY },
-    { N_("1 week"),             DVR_RET_1WEEK },
-    { N_("2 weeks"),            DVR_RET_2WEEK },
-    { N_("3 weeks"),            DVR_RET_3WEEK },
-    { N_("1 month"),            DVR_RET_1MONTH },
-    { N_("2 months"),           DVR_RET_2MONTH },
-    { N_("3 months"),           DVR_RET_3MONTH },
-    { N_("6 months"),           DVR_RET_6MONTH },
-    { N_("1 year"),             DVR_RET_1YEAR },
-    { N_("2 years"),            DVR_RET_2YEARS },
-    { N_("3 years"),            DVR_RET_3YEARS },
-    { N_("Maintained space"),   DVR_RET_SPACE },
-    { N_("Forever"),            DVR_RET_FOREVER },
+    { N_("1 day"),              DVR_RET_REM_1DAY },
+    { N_("3 days"),             DVR_RET_REM_3DAY },
+    { N_("5 days"),             DVR_RET_REM_5DAY },
+    { N_("1 week"),             DVR_RET_REM_1WEEK },
+    { N_("2 weeks"),            DVR_RET_REM_2WEEK },
+    { N_("3 weeks"),            DVR_RET_REM_3WEEK },
+    { N_("1 month"),            DVR_RET_REM_1MONTH },
+    { N_("2 months"),           DVR_RET_REM_2MONTH },
+    { N_("3 months"),           DVR_RET_REM_3MONTH },
+    { N_("6 months"),           DVR_RET_REM_6MONTH },
+    { N_("1 year"),             DVR_RET_REM_1YEAR },
+    { N_("2 years"),            DVR_RET_REM_2YEARS },
+    { N_("3 years"),            DVR_RET_REM_3YEARS },
+    { N_("Maintained space"),   DVR_REM_SPACE },
+    { N_("Forever"),            DVR_RET_REM_FOREVER },
   };
   return strtab2htsmsg_u32(tab, 1, lang);
 }
@@ -734,21 +741,21 @@ static htsmsg_t *
 dvr_config_class_retention_list ( void *o, const char *lang )
 {
   static const struct strtab_u32 tab[] = {
-    { N_("1 day"),              DVR_RET_1DAY },
-    { N_("3 days"),             DVR_RET_3DAY },
-    { N_("5 days"),             DVR_RET_5DAY },
-    { N_("1 week"),             DVR_RET_1WEEK },
-    { N_("2 weeks"),            DVR_RET_2WEEK },
-    { N_("3 weeks"),            DVR_RET_3WEEK },
-    { N_("1 month"),            DVR_RET_1MONTH },
-    { N_("2 months"),           DVR_RET_2MONTH },
-    { N_("3 months"),           DVR_RET_3MONTH },
-    { N_("6 months"),           DVR_RET_6MONTH },
-    { N_("1 year"),             DVR_RET_1YEAR },
-    { N_("2 years"),            DVR_RET_2YEARS },
-    { N_("3 years"),            DVR_RET_3YEARS },
+    { N_("1 day"),              DVR_RET_REM_1DAY },
+    { N_("3 days"),             DVR_RET_REM_3DAY },
+    { N_("5 days"),             DVR_RET_REM_5DAY },
+    { N_("1 week"),             DVR_RET_REM_1WEEK },
+    { N_("2 weeks"),            DVR_RET_REM_2WEEK },
+    { N_("3 weeks"),            DVR_RET_REM_3WEEK },
+    { N_("1 month"),            DVR_RET_REM_1MONTH },
+    { N_("2 months"),           DVR_RET_REM_2MONTH },
+    { N_("3 months"),           DVR_RET_REM_3MONTH },
+    { N_("6 months"),           DVR_RET_REM_6MONTH },
+    { N_("1 year"),             DVR_RET_REM_1YEAR },
+    { N_("2 years"),            DVR_RET_REM_2YEARS },
+    { N_("3 years"),            DVR_RET_REM_3YEARS },
     { N_("On file removal"),    DVR_RET_ONREMOVE },
-    { N_("Forever"),            DVR_RET_FOREVER },
+    { N_("Forever"),            DVR_RET_REM_FOREVER },
   };
   return strtab2htsmsg_u32(tab, 1, lang);
 }
@@ -783,10 +790,20 @@ dvr_config_class_pathname_set(void *o, const void *v)
   return 0;
 }
 
+CLASS_DOC(dvrconfig)
+PROP_DOC(preprocessor)
+PROP_DOC(postprocessor)
+PROP_DOC(postremove)
+PROP_DOC(pathname)
+PROP_DOC(cache_scheme)
+PROP_DOC(runningstate)
+
 const idclass_t dvr_config_class = {
   .ic_class      = "dvrconfig",
-  .ic_caption    = N_("DVR configuration profile"),
+  .ic_caption    = N_("DVR - Profiles"),
   .ic_event      = "dvrconfig",
+  .ic_doc        = tvh_doc_dvrconfig_class,
+  .ic_changed    = dvr_config_class_changed,
   .ic_save       = dvr_config_class_save,
   .ic_get_title  = dvr_config_class_get_title,
   .ic_delete     = dvr_config_class_delete,
@@ -862,30 +879,32 @@ const idclass_t dvr_config_class = {
       .get      = dvr_config_class_profile_get,
       .rend     = dvr_config_class_profile_rend,
       .list     = profile_class_get_list,
+      .opts     = PO_ADVANCED,
       .group    = 1,
     },
     {
       .type     = PT_INT,
       .id       = "cache",
       .name     = N_("Cache scheme"),
-      .desc     = N_("Select the cache scheme used to store recordings. "
-                     "Leave as “system” unless you have a special use "
+      .desc     = N_("The cache scheme to use/used to store recordings. "
+                     "Leave as \"system\" unless you have a special use "
                      "case for one of the others. See Help for details."),
+      .doc      = prop_doc_cache_scheme,
       .off      = offsetof(dvr_config_t, dvr_muxcnf.m_cache),
       .def.i    = MC_CACHE_DONTKEEP,
       .list     = dvr_config_class_cache_list,
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT | PO_DOC_NLIST,
       .group    = 1,
     },
     {
       .type     = PT_U32,
       .id       = "retention-days",
       .name     = N_("DVR log retention period"),
-      .desc     = N_("Number of days to retain infomation about recordings."),
+      .desc     = N_("Number of days to retain information about recordings. Once this period is exceeded, duplicate detection will not be possible anymore."),
       .off      = offsetof(dvr_config_t, dvr_retention_days),
       .def.u32  = DVR_RET_ONREMOVE,
       .list     = dvr_config_class_retention_list,
-      .opts     = PO_EXPERT,
+      .opts     = PO_EXPERT | PO_DOC_NLIST,
       .group    = 1,
     },
     {
@@ -894,8 +913,9 @@ const idclass_t dvr_config_class = {
       .name     = N_("DVR file retention period"),
       .desc     = N_("Number of days to keep the recorded files."),
       .off      = offsetof(dvr_config_t, dvr_removal_days),
-      .def.u32  = DVR_RET_FOREVER,
+      .def.u32  = DVR_RET_REM_FOREVER,
       .list     = dvr_config_class_removal_list,
+      .opts     = PO_DOC_NLIST,
       .group    = 1,
     },
     {
@@ -903,7 +923,7 @@ const idclass_t dvr_config_class = {
       .id       = "clone",
       .name     = N_("Clone scheduled entry on error"),
       .desc     = N_("If an error occurs clone the scheduled entry and "
-                     "try to record again if possible."),
+                     "try to record again (if possible)."),
       .off      = offsetof(dvr_config_t, dvr_clone),
       .opts     = PO_ADVANCED,
       .def.u32  = 1,
@@ -914,7 +934,7 @@ const idclass_t dvr_config_class = {
       .id       = "rerecord-errors",
       .name     = N_("Schedule a re-recording if more errors than (0=off)"),
       .desc     = N_("If more than x errors occur during a recording "
-                     "schedule a re-record if possible."),
+                     "schedule a re-record (if possible)."),
       .off      = offsetof(dvr_config_t, dvr_rerecord_errors),
       .opts     = PO_ADVANCED,
       .group    = 1,
@@ -928,7 +948,7 @@ const idclass_t dvr_config_class = {
                      "those with tuners that take some time to tune "
                      "and/or send garbage data at the beginning. "),
       .off      = offsetof(dvr_config_t, dvr_warm_time),
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT,
       .group    = 1,
       .def.u32  = 30
     },
@@ -937,15 +957,16 @@ const idclass_t dvr_config_class = {
       .id       = "pre-extra-time",
       .name     = N_("Pre-recording padding"),
       .desc     = N_("Start recording earlier than the defined "
-                     "start time by x minutes, for example if a program "
-                     "is to start at 13:00 and you set a padding of 5 "
+                     "Start recording earlier than the defined start "
+                     "time by x minutes: for example, if a program is "
+                     "to start at 13:00 and you set a padding of 5 "
                      "minutes it will start recording at 12:54:30 "
-                     "(including a warming-up time of 30 seconds). If this "
-                     "isn't set the pre-recording padding if set in the "
-                     "channel or DVR entry will be used."),
+                     "(including a warm-up time of 30 seconds). If this "
+                     "isn't specified, any pre-recording padding as set "
+                     "in the channel or DVR entry will be used."),
       .off      = offsetof(dvr_config_t, dvr_extra_time_pre),
       .list     = dvr_config_class_extra_list,
-      .opts     = PO_ADVANCED,
+      .opts     = PO_DOC_NLIST,
       .group    = 1,
     },
     {
@@ -956,7 +977,7 @@ const idclass_t dvr_config_class = {
                      "stop time."),
       .off      = offsetof(dvr_config_t, dvr_extra_time_post),
       .list     = dvr_config_class_extra_list,
-      .opts     = PO_ADVANCED,
+      .opts     = PO_DOC_NLIST,
       .group    = 1,
     },
     {
@@ -968,7 +989,7 @@ const idclass_t dvr_config_class = {
       .off      = offsetof(dvr_config_t, dvr_update_window),
       .list     = dvr_config_entry_class_update_window_list,
       .def.u32  = 24*3600,
-      .opts     = PO_EXPERT,
+      .opts     = PO_EXPERT | PO_DOC_NLIST,
       .group    = 1,
     },
     {
@@ -976,9 +997,9 @@ const idclass_t dvr_config_class = {
       .id       = "epg-running",
       .name     = N_("Use EPG running state"),
       .desc     = N_("Use EITp/f to decide event start/stop. This is "
-                     "also known as accurate recording. Note that this "
-                     "can have unexpected results if the broadcaster "
-                     "isn`t very good at time keeping."),
+                     "also known as \"Accurate Recording\". See Help "
+                     "for details."),
+      .doc      = prop_doc_runningstate,
       .off      = offsetof(dvr_config_t, dvr_running),
       .opts     = PO_ADVANCED,
       .def.u32  = 1,
@@ -1004,9 +1025,21 @@ const idclass_t dvr_config_class = {
     },
     {
       .type     = PT_STR,
+      .id       = "preproc",
+      .name     = N_("Pre-processor command"),
+      .desc     = N_("Script/program to be run when a recording starts "
+                     "(service is subscribed but no filename available)."),
+      .doc      = prop_doc_preprocessor,
+      .off      = offsetof(dvr_config_t, dvr_preproc),
+      .opts     = PO_EXPERT,
+      .group    = 1,
+    },
+    {
+      .type     = PT_STR,
       .id       = "postproc",
       .name     = N_("Post-processor command"),
       .desc     = N_("Script/program to be run when a recording completes."),
+      .doc      = prop_doc_postprocessor,
       .off      = offsetof(dvr_config_t, dvr_postproc),
       .opts     = PO_ADVANCED,
       .group    = 1,
@@ -1016,6 +1049,7 @@ const idclass_t dvr_config_class = {
       .id       = "postremove",
       .name     = N_("Post-remove command"),
       .desc     = N_("Script/program to be run when a recording gets removed."),
+      .doc      = prop_doc_postremove,
       .off      = offsetof(dvr_config_t, dvr_postremove),
       .opts     = PO_EXPERT,
       .group    = 1,
@@ -1068,7 +1102,7 @@ const idclass_t dvr_config_class = {
       .off      = offsetof(dvr_config_t, dvr_charset),
       .set      = dvr_config_class_charset_set,
       .list     = dvr_config_class_charset_list,
-      .opts     = PO_ADVANCED,
+      .opts     = PO_EXPERT,
       .def.s    = "UTF-8",
       .group    = 2,
     },
@@ -1088,8 +1122,9 @@ const idclass_t dvr_config_class = {
       .id       = "skip-commercials",
       .name     = N_("Skip commercials"),
       .desc     = N_("Commercials will be dropped from the "
-                     "recordings. At the moment, commercial detection "
-                     "only works for the Swedish channel TV4."),
+                     "recordings. Commercial detection works using EITp/f "
+                     "(EPG running state) and for the Swedish channel TV4 "
+                     "(using teletext info)."),
       .off      = offsetof(dvr_config_t, dvr_skip_commercials),
       .opts     = PO_ADVANCED,
       .def.i    = 1,
@@ -1102,6 +1137,7 @@ const idclass_t dvr_config_class = {
       .desc     = N_("The string allows you to manually specify the "
                      "full path generation using predefined "
                      "modifiers. See Help for full details."),
+      .doc      = prop_doc_pathname,
       .set      = dvr_config_class_pathname_set,
       .off      = offsetof(dvr_config_t, dvr_pathname),
       .opts     = PO_EXPERT,
@@ -1122,9 +1158,9 @@ const idclass_t dvr_config_class = {
       .id       = "day-dir",
       .name     = N_("Make subdirectories per day"),
       .desc     = N_("Create a new directory per day in the "
-                     "recording system path. Only days when anything is "
-                     "recorded will the folder be created. The format of the "
-                     "directory will be ISO standard YYYY-MM-DD."),
+                     "recording system path. Folders will only be "
+                     "created when something is recorded. The format "
+                     "of the directory will be ISO standard YYYY-MM-DD."),
       .off      = offsetof(dvr_config_t, dvr_dir_per_day),
       .opts     = PO_EXPERT,
       .group    = 4,
@@ -1134,9 +1170,9 @@ const idclass_t dvr_config_class = {
       .id       = "channel-dir",
       .name     = N_("Make subdirectories per channel"),
       .desc     = N_("Create a directory per channel when "
-                     "storing recordings. If both this and the ‘directory "
-                     "per day’ checkbox is enabled, the date-directory "
-                     "will be parent to the per-channel directory."),
+                     "storing recordings. If both this and the 'directory "
+                     "per day' checkbox is enabled, the date-directory "
+                     "will be the parent of the per-channel directory."),
       .off      = offsetof(dvr_config_t, dvr_channel_dir),
       .opts     = PO_EXPERT,
       .group    = 4,
@@ -1161,7 +1197,7 @@ const idclass_t dvr_config_class = {
                      "the event title. This applies to both the title "
                      "stored in the file and to the filename itself."),
       .off      = offsetof(dvr_config_t, dvr_channel_in_title),
-      .opts     = PO_EXPERT,
+      .opts     = PO_ADVANCED,
       .group    = 5,
     },
     {
@@ -1172,7 +1208,7 @@ const idclass_t dvr_config_class = {
                      "the event title. This applies to both the title "
                      "stored in the file and to the filename itself."),
       .off      = offsetof(dvr_config_t, dvr_date_in_title),
-      .opts     = PO_EXPERT,
+      .opts     = PO_ADVANCED,
       .group    = 5,
     },
     {
@@ -1183,7 +1219,7 @@ const idclass_t dvr_config_class = {
                      "the event title. This applies to both the title "
                      "stored in the file and to the filename itself."),
       .off      = offsetof(dvr_config_t, dvr_time_in_title),
-      .opts     = PO_EXPERT,
+      .opts     = PO_ADVANCED,
       .group    = 5,
     },
     {
@@ -1210,7 +1246,7 @@ const idclass_t dvr_config_class = {
       .type     = PT_BOOL,
       .id       = "omit-title",
       .name     = N_("Don't include title in filename"),
-      .desc     = N_("Don`t include the title in the filename."),
+      .desc     = N_("Don't include the title in the filename."),
       .off      = offsetof(dvr_config_t, dvr_omit_title),
       .opts     = PO_EXPERT,
       .group    = 6,
@@ -1243,7 +1279,7 @@ const idclass_t dvr_config_class = {
                      "(e.g. for an SMB/CIFS share) will be stripped out "
                      "or converted."),
       .off      = offsetof(dvr_config_t, dvr_windows_compatible_filenames),
-      .opts     = PO_EXPERT,
+      .opts     = PO_ADVANCED,
       .group    = 6,
     },
     {}
@@ -1260,7 +1296,7 @@ dvr_config_destroy_by_profile(profile_t *pro, int delconf)
 
   while((cfg = LIST_FIRST(&pro->pro_dvr_configs)) != NULL) {
     LIST_REMOVE(cfg, profile_link);
-    cfg->dvr_profile = profile_find_by_name(NULL, "dvr");
+    cfg->dvr_profile = profile_find_by_name(NULL, "pass");
   }
 }
 
@@ -1279,6 +1315,7 @@ dvr_config_init(void)
   /* Default settings */
 
   LIST_INIT(&dvrconfigs);
+  idclass_register(&dvr_config_class);
 
   if ((l = hts_settings_load("dvr/config")) != NULL) {
     HTSMSG_FOREACH(f, l) {

@@ -28,6 +28,7 @@
 #include <dirent.h>
 
 #include "htsmsg.h"
+#include "htsmsg_binary.h"
 #include "htsmsg_json.h"
 #include "settings.h"
 #include "tvheadend.h"
@@ -82,7 +83,7 @@ hts_settings_makedirs ( const char *inpath )
     }
     x--;
   }
-  return makedirs(path, 0700, -1, -1);
+  return makedirs(LS_SETTINGS, path, 0700, 1, -1, -1);
 }
 
 /**
@@ -133,7 +134,7 @@ hts_settings_save(htsmsg_t *record, const char *pathfmt, ...)
   va_list ap;
   htsbuf_queue_t hq;
   htsbuf_data_t *hd;
-  int ok;
+  int ok, r, pack;
 
   if(settingspath == NULL)
     return;
@@ -146,33 +147,64 @@ hts_settings_save(htsmsg_t *record, const char *pathfmt, ...)
   /* Create directories */
   if (hts_settings_makedirs(path)) return;
 
-  tvhdebug("settings", "saving to %s", path);
+  tvhdebug(LS_SETTINGS, "saving to %s", path);
 
   /* Create tmp file */
   snprintf(tmppath, sizeof(tmppath), "%s.tmp", path);
   if((fd = tvh_open(tmppath, O_CREAT | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR)) < 0) {
-    tvhlog(LOG_ALERT, "settings", "Unable to create \"%s\" - %s",
-	    tmppath, strerror(errno));
+    tvhalert(LS_SETTINGS, "Unable to create \"%s\" - %s",
+	     tmppath, strerror(errno));
     return;
   }
 
   /* Store data */
+#if ENABLE_ZLIB
+  pack = strstr(path, "/muxes/") != NULL && /* ugly, redesign API */
+         strstr(path, "/networks/") != NULL &&
+         strstr(path, "/input/") != NULL;
+#else
+  pack = 0;
+#endif
   ok = 1;
-  htsbuf_queue_init(&hq, 0);
-  htsmsg_json_serialize(record, &hq, 1);
-  TAILQ_FOREACH(hd, &hq.hq_q, hd_link)
-    if(tvh_write(fd, hd->hd_data + hd->hd_data_off, hd->hd_data_len)) {
-      tvhlog(LOG_ALERT, "settings", "Failed to write file \"%s\" - %s",
-	      tmppath, strerror(errno));
-      ok = 0;
-      break;
+
+  if (!pack) {
+    htsbuf_queue_init(&hq, 0);
+    htsmsg_json_serialize(record, &hq, 1);
+    TAILQ_FOREACH(hd, &hq.hq_q, hd_link)
+      if(tvh_write(fd, hd->hd_data + hd->hd_data_off, hd->hd_data_len)) {
+        tvhalert(LS_SETTINGS, "Failed to write file \"%s\" - %s",
+                 tmppath, strerror(errno));
+        ok = 0;
+        break;
+      }
+    htsbuf_queue_flush(&hq);
+  } else {
+#if ENABLE_ZLIB
+    void *msgdata = NULL;
+    size_t msglen;
+    r = htsmsg_binary_serialize(record, &msgdata, &msglen, 2*1024*1024);
+    if (!r && msglen >= 4) {
+      r = tvh_gzip_deflate_fd_header(fd, msgdata + 4, msglen - 4, NULL, 3);
+      if (r)
+        ok = 0;
+    } else {
+      tvhalert(LS_SETTINGS, "Unable to pack the configuration data \"%s\"", path);
     }
+    free(msgdata);
+#endif
+  }
   close(fd);
-  htsbuf_queue_flush(&hq);
 
   /* Move */
   if(ok) {
-    rename(tmppath, path);
+    r = rename(tmppath, path);
+    if (r && errno == EISDIR) {
+      rmtree(path);
+      r = rename(tmppath, path);
+    }
+    if (r)
+      tvhalert(LS_SETTINGS, "Unable to rename file \"%s\" to \"%s\" - %s",
+	       tmppath, path, strerror(errno));
   
   /* Delete tmp */
   } else
@@ -193,15 +225,32 @@ hts_settings_load_one(const char *filename)
   /* Open */
   if (!(fp = fb_open(filename, 1, 0))) return NULL;
   size = fb_size(fp);
-  
+
   /* Load data */
   mem    = malloc(size+1);
   n      = fb_read(fp, mem, size);
   if (n >= 0) mem[n] = 0;
 
   /* Decode */
-  if(n == size)
-    r = htsmsg_json_deserialize(mem);
+  if(n == size) {
+    if (size > 12 && memcmp(mem, "\xff\xffGZIP00", 8) == 0) {
+#if ENABLE_ZLIB
+      uint32_t orig = (mem[8] << 24) | (mem[9] << 16) | (mem[10] << 8) | mem[11];
+      if (orig > 10*1024*1024U) {
+        tvhalert(LS_SETTINGS, "too big gzip for %s", filename);
+        r = NULL;
+      } else if (orig > 0) {
+        uint8_t *unpacked = tvh_gzip_inflate((uint8_t *)mem + 12, size - 12, orig);
+        if (unpacked) {
+          r = htsmsg_binary_deserialize(unpacked, orig, NULL);
+          free(unpacked);
+        }
+      }
+#endif
+    } else {
+      r = htsmsg_json_deserialize(mem);
+    }
+  }
 
   /* Close */
   fb_close(fp);
@@ -347,6 +396,7 @@ int
 hts_settings_open_file(int for_write, const char *pathfmt, ...)
 {
   char path[PATH_MAX];
+  int flags;
   va_list ap;
 
   /* Build path */
@@ -359,7 +409,7 @@ hts_settings_open_file(int for_write, const char *pathfmt, ...)
     if (hts_settings_makedirs(path)) return -1;
 
   /* Open file */
-  int flags = for_write ? O_CREAT | O_TRUNC | O_WRONLY : O_RDONLY;
+  flags = for_write ? O_CREAT | O_TRUNC | O_WRONLY : O_RDONLY;
 
   return tvh_open(path, flags, S_IRUSR | S_IWUSR);
 }

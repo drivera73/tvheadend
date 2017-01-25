@@ -123,8 +123,10 @@ dvb_fastscan_create(htsmsg_t *e)
   if (bq == NULL)
     goto fail;
   bq->bq_shield = 1;
-  if (bq->bq_saveflag)
-    bouquet_save(bq, 1);
+  if (bq->bq_saveflag) {
+    bq->bq_saveflag = 0;
+    idnode_changed(&bq->bq_id);
+  }
 
   fs = RB_INSERT_SORTED(&fastscan_rb, fastscan_rb_skel, link, _fs_cmp);
   if (!fs) {
@@ -144,7 +146,7 @@ dvb_fastscan_create(htsmsg_t *e)
   return;
 
 fail:
-  tvhwarn("fastscan", "wrong entry format");
+  tvhwarn(LS_FASTSCAN, "wrong entry format");
 }
 
 /*
@@ -156,7 +158,7 @@ void dvb_fastscan_init ( void )
   htsmsg_field_t *f;
 
   if (!(c = hts_settings_load("fastscan"))) {
-    tvhwarn("fastscan", "configuration file missing");
+    tvhwarn(LS_FASTSCAN, "configuration file missing");
     return;
   }
   

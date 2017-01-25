@@ -173,19 +173,19 @@ tvheadend.idnode_filter_fields = function(d, list)
         var o = list.substring(1).split(',');
         r = d.slice();
         for (var i = 0; i < o.length; i++)
-           for (var j = 0; j < r.length; j++)
-              if (r[j].id === o[i]) {
-                  r.splice(i, 1);
-                  break;
-              }
+            for (var j = 0; j < r.length; j++)
+                if (r[j].id === o[i]) {
+                    r.splice(j, 1);
+                    break;
+                }
     } else {
         var o = list.split(',');
         for (var i = 0; i < o.length; i++)
-           for (var j = 0; j < d.length; j++)
-              if (d[j].id === o[i]) {
-                  r.push(d[j]);
-                  break;
-              }
+            for (var j = 0; j < d.length; j++)
+                if (d[j].id === o[i]) {
+                    r.push(d[j]);
+                    break;
+                }
     }
     return r;
 }
@@ -248,6 +248,9 @@ tvheadend.IdNodeField = function(conf)
     this.duration = conf.duration;
     this.date = conf.date;
     this.intsplit = conf.intsplit;
+    this.intmin = conf.intmin;
+    this.intmax = conf.intmax;
+    this.intstep = conf.intstep;
     this.hexa = conf.hexa;
     this.group = conf.group;
     this.lorder = conf.lorder;
@@ -334,7 +337,7 @@ tvheadend.IdNodeField = function(conf)
             props.xtype = 'checkcolumn';
             props.renderer = Ext.ux.grid.CheckColumn.prototype.renderer;
         }
-        
+
         return props;
     };
 
@@ -344,7 +347,7 @@ tvheadend.IdNodeField = function(conf)
             return function(v) {
                 return '<span class="tvh-grid-unset">********</span>';
             }
-            
+
         if (this.type === 'time') {
             if (this.duration)
                 return function(v) {
@@ -374,7 +377,7 @@ tvheadend.IdNodeField = function(conf)
             return function(v) {
                 if (v > 0) {
                     var dt = new Date(v * 1000);
-                    var wd = dt.toLocaleString(window.navigator.language, {weekday: 'short'});
+                    var wd = dt.toLocaleString(tvheadend.language, {weekday: 'short'});
                     return wd + ' ' + dt.toLocaleString();
                 }
                 return '';
@@ -423,7 +426,7 @@ tvheadend.IdNodeField = function(conf)
             disabled: d,
             width: 300
         };
-        
+
         /* ComboBox */
         if (this['enum']) {
 
@@ -456,7 +459,7 @@ tvheadend.IdNodeField = function(conf)
                 c['forceSelection'] = false;
                 c['triggerAction'] = 'all';
                 c['emptyText'] = _('Select {0} ...').replace('{0}', this.text);
-                
+
                 combo = true;
             }
 
@@ -488,8 +491,14 @@ tvheadend.IdNodeField = function(conf)
                     } else if (this.intsplit) {
                         c['maskRe'] = /[0-9\.]/;
                         cons = Ext.form.TextField;
-                    } else
+                    } else if (this.intmin || this.intmax) {
+                        cons = Ext.ux.form.SpinnerField;
+                        c['minValue'] = this.intmin;
+                        c['maxValue'] = this.intmax;
+                        c['incrementValue'] = this.intstep || 1;
+                    } else {
                         cons = Ext.form.NumberField;
+                    }
                     break;
 
                 /* 'str' and 'perm' */
@@ -721,14 +730,14 @@ tvheadend.idnode_editor_field = function(f, conf)
         }
 
         /* TODO: listeners for regexp?
-         listeners       : { 
+         listeners       : {
          keyup: function() {
          this.store.filter('val', this.getRawValue(), true, false);
          },
          beforequery: function(queryEvent) {
          queryEvent.combo.onLoad();
          // prevent doQuery from firing and clearing out my filter.
-         return false; 
+         return false;
          }
          }
          */
@@ -812,6 +821,18 @@ tvheadend.idnode_editor_field = function(f, conf)
                     maskRe: /[0-9\.]/
                 });
                 break;
+            } else if (f.intmin || f.intmax) {
+               r = new Ext.ux.form.SpinnerField({
+                    fieldLabel: f.caption,
+                    name: f.id,
+                    disabled: d,
+                    width: 300,
+                    value: value,
+                    minValue: f.intmin,
+                    maxValue: f.intmax,
+                    incrementValue: f.intstep || 1
+               });
+               break;
             }
             r = new Ext.form.NumberField({
                 fieldLabel: f.caption,
@@ -936,7 +957,15 @@ tvheadend.idnode_editor_form = function(uilevel, d, meta, panel, conf)
                        collapsible: conf.nocollapse ? false : true,
                        collapsed: conf.collapsed ? true : false,
                        animCollapse: true,
-                       items: conf.items
+                       items: conf.items,
+                       listeners: {
+                           collapse: function() {
+                               panel.fireEvent('collapse');
+                           },
+                           expand: function() {
+                               panel.fireEvent('expand');
+                           }
+                       }
                    });
     }
 
@@ -981,7 +1010,7 @@ tvheadend.idnode_editor_form = function(uilevel, d, meta, panel, conf)
                     p = newFieldSet({ title: m.name });
                     mfs[number] = p;
                 }
-                cfs[number] = p;                    
+                cfs[number] = p;
             }
         }
         for (var number in groups) {
@@ -1043,10 +1072,15 @@ tvheadend.idnode_editor = function(_uilevel, item, conf)
     var buttons = [];
     var uilevel = _uilevel;
 
+    function shadow() {
+         if (panel.ownerCt.baseCls == "x-window")
+             panel.ownerCt.syncShadow();
+    }
+
     function destroy() {
         panel.removeAll(true);
     }
-    
+
     function build() {
         var c = {
             showpwd: conf.showpwd,
@@ -1090,6 +1124,8 @@ tvheadend.idnode_editor = function(_uilevel, item, conf)
                 var node = null;
                 if (form.isDirty() || conf.alwaysDirty) {
                     node = values(form);
+                    if (conf.presave)
+                        conf.presave(conf, node);
                     tvheadend.Ajax({
                         url: conf.saveURL || 'api/idnode/save',
                         params: {
@@ -1126,7 +1162,12 @@ tvheadend.idnode_editor = function(_uilevel, item, conf)
                                 node: Ext.encode(node)
                             },
                             success: function(d) {
-                                Ext.MessageBox.alert(_('Apply'), _('Changes were applied!'));
+                                Ext.MessageBox.show({
+                                    title: _('Apply'),
+                                    msg: _('Changes were applied!'),
+                                    buttons: Ext.MessageBox.OK,
+                                    icon: Ext.MessageBox.INFO,
+                                });
                                 form.trackResetOnLoad = true;
                                 form.setValues(node);
                             },
@@ -1152,20 +1193,25 @@ tvheadend.idnode_editor = function(_uilevel, item, conf)
                 destroy();
                 build();
                 panel.getForm().setValues(values);
+                shadow();
             });
             buttons.push('->');
             buttons.push(uilevelBtn);
         }
 
-        if (conf.help) {
-            var helpBtn = new Ext.Button({
-                text: _('Help'),
-                iconCls: 'help',
-                handler: conf.help
-            });
-            buttons.push(uilevelBtn ? '-' : '->');
-            buttons.push(helpBtn);
+        var help = conf.help;
+        if (!help) {
+            help = function() {
+                new tvheadend.mdhelp('class/' + item['class']);
+            }
         }
+        var helpBtn = new Ext.Button({
+            text: _('Help'),
+            iconCls: 'help',
+            handler: help
+        });
+        buttons.push(uilevelBtn ? '-' : '->');
+        buttons.push(helpBtn);
 
         if (conf.buildbtn)
             conf.buildbtn(conf, buttons);
@@ -1184,7 +1230,15 @@ tvheadend.idnode_editor = function(_uilevel, item, conf)
         defaultType: 'textfield',
         buttonAlign: 'left',
         autoScroll: true,
-        buttons: buttons
+        buttons: buttons,
+        listeners: {
+            collapse: function() {
+                shadow();
+            },
+            expand: function() {
+                shadow();
+            }
+        }
     });
 
     build();
@@ -1242,10 +1296,10 @@ tvheadend.idnode_editor_win = function(_uilevel, conf)
         uuids = [];
         for (var i = 0; i < r.length; i++)
             uuids.push(r[i].id);
-            
+
         params['uuid'] = r[0].id;
     }
-        
+
     params['meta'] = 1;
 
     conf.win = null;
@@ -1423,7 +1477,7 @@ tvheadend.idnode_create = function(conf, onlyDefault, cloneValues)
             }
         });
         buttons.push(abuttons.save);
-        
+
         abuttons.apply = new Ext.Button({
             tooltip: _('Apply settings'),
             text: _('Apply'),
@@ -1443,7 +1497,13 @@ tvheadend.idnode_create = function(conf, onlyDefault, cloneValues)
                         url: conf.create.url || conf.url + '/create',
                         params: params,
                         success: function(d) {
-                            Ext.MessageBox.confirm(_('Apply'), _('Changes were applied!'));
+                            Ext.MessageBox.show({
+                                title: _('Apply'),
+                                msg: _('Changes were applied!'),
+                                buttons: Ext.MessageBox.OK,
+                                icon: Ext.MessageBox.INFO,
+                            });
+                            //Ext.MessageBox.confirm(_('Apply'), _('Changes were applied!'));
                             form.trackResetOnLoad = true;
                             form.setValues(node);
                         },
@@ -1980,14 +2040,19 @@ tvheadend.idnode_grid = function(panel, conf)
         }
 
         /* Help */
-        if (conf.help) {
-            buttons.push(abuttons.uilevel ? '-' : '->');
-            buttons.push({
-                text: _('Help'),
-                iconCls: 'help',
-                handler: conf.help
-            });
+        var help = conf.help;
+        if (!help) {
+            help = function() {
+                new tvheadend.mdhelp('class/' + idnode.clazz);
+            }
         }
+
+        buttons.push(abuttons.uilevel ? '-' : '->');
+        buttons.push({
+            text: _('Help'),
+            iconCls: 'help',
+            handler: help
+        });
 
         plugins.push(filter);
         var gconf = {
@@ -2363,14 +2428,18 @@ tvheadend.idnode_form_grid = function(panel, conf)
         }
 
         /* Help */
-        if (conf.help) {
-            buttons.push(abuttons.uilevel ? '-' : '->');
-            buttons.push({
-                text: _('Help'),
-                iconCls: 'help',
-                handler: conf.help
-            });
+        var help = conf.help;
+        if (!help) {
+            help = function() {
+                new tvheadend.mdhelp('class/' + conf.clazz);
+            }
         }
+        buttons.push(abuttons.uilevel ? '-' : '->');
+        buttons.push({
+            text: _('Help'),
+            iconCls: 'help',
+            handler: help
+        });
 
         function roweditor_destroy() {
             if (current && current.editor) {
@@ -2455,7 +2524,7 @@ tvheadend.idnode_form_grid = function(panel, conf)
             },
             items: [grid]
         });
-        
+
         dpanel.add(mpanel);
         dpanel.doLayout(false, true);
 
@@ -2797,14 +2866,18 @@ tvheadend.idnode_simple = function(panel, conf)
         }
 
         /* Help */
-        if (conf.help) {
-            buttons.push(abuttons.uilevel ? '-' : '->');
-            buttons.push({
-                text: _('Help'),
-                iconCls: 'help',
-                handler: conf.help
-            });
+        var help = conf.help;
+        if (!help) {
+            help = function() {
+              new tvheadend.mdhelp('class/' + lastdata['class']);
+            }
         }
+        buttons.push(abuttons.uilevel ? '-' : '->');
+        buttons.push({
+            text: _('Help'),
+            iconCls: 'help',
+            handler: help
+        });
 
         function form_load(force) {
             if (!force && current)
@@ -2835,7 +2908,7 @@ tvheadend.idnode_simple = function(panel, conf)
                align: 'stretch'
             }
         });
-        
+
         dpanel.add(mpanel);
         dpanel.doLayout(false, true);
 

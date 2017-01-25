@@ -41,6 +41,9 @@ tvheadend.baseconf = function(panel, index) {
                 if (l !== tvheadend.uilevel)
                     reload = 1;
             }
+            var n = data['theme_ui'];
+            if (n !== tvheadend.theme)
+              reload = 1;
             var n = data['uilevel_nochange'] ? true : false;
             if (n !== tvheadend.uilevel_nochange)
                 reload = 1;
@@ -52,9 +55,6 @@ tvheadend.baseconf = function(panel, index) {
                 reload = 1;
             if (reload)
                 window.location.reload();
-        },
-        help: function() {
-            new tvheadend.help(_('General Configuration'), 'config_general.html');
         }
     });
 
@@ -105,16 +105,14 @@ tvheadend.imgcacheconf = function(panel, index) {
 
     tvheadend.idnode_simple(panel, {
         url: 'api/imagecache/config',
-        title: _('Image cache'),
+        title: _('Image Cache'),
         iconCls: 'imgcacheconf',
         tabIndex: index,
+        uilevel: 'expert',
         comet: 'imagecache',
         width: 550,
         labelWidth: 200,
-        tbar: [cleanButton, triggerButton],
-        help: function() {
-            new tvheadend.help(_('General Configuration'), 'config_general.html');
-        }
+        tbar: [cleanButton, triggerButton]
     });
 
 };
@@ -153,9 +151,6 @@ tvheadend.satipsrvconf = function(panel, index) {
         comet: 'satip_server',
         width: 600,
         labelWidth: 250,
-        tbar: [discoverButton],
-        help: function() {
-            new tvheadend.help(_('SAT>IP Server Configuration'), 'config_satips.html');
-        }
+        tbar: [discoverButton]
     });
 };
